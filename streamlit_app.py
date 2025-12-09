@@ -13,8 +13,11 @@ FLARESOLVERR_TARBALL_URL = (
     f"https://github.com/FlareSolverr/FlareSolverr/releases/download/"
     f"{FLARESOLVERR_VERSION}/flaresolverr_linux_x64.tar.gz"
 )
+
+# Semua file disimpan di folder ini
 FLARESOLVERR_DIR = Path("flaresolverr_bin")
-FLARESOLVERR_BINARY = FLARESOLVERR_DIR / "flaresolverr"
+FLARESOLVERR_TAR = FLARESOLVERR_DIR / "flaresolverr_linux_x64.tar.gz"
+
 FLARESOLVERR_PORT = 8191
 FLARESOLVERR_URL = f"http://localhost:{FLARESOLVERR_PORT}"
 HEALTH_ENDPOINT = f"{FLARESOLVERR_URL}/health"
@@ -22,38 +25,80 @@ API_ENDPOINT = f"{FLARESOLVERR_URL}/v1"
 
 
 # -----------------------------
-# Helpers: download & run FlareSolverr
+# Helpers: binary discovery
 # -----------------------------
-def download_flaresolverr():
+def list_all_files():
+    """Debug helper: list semua file di folder FlareSolverr."""
+    if not FLARESOLVERR_DIR.exists():
+        return []
+    return [str(p) for p in FLARESOLVERR_DIR.rglob("*")]
+
+
+def find_flaresolverr_binary():
+    """
+    Cari file bernama 'flaresolverr' di dalam FLARESOLVERR_DIR.
+    Tarball biasanya berisi folder 'flaresolverr/flaresolverr'.
+    """
+    if not FLARESOLVERR_DIR.exists():
+        return None
+
+    candidates = [
+        p
+        for p in FLARESOLVERR_DIR.rglob("flaresolverr")
+        if p.is_file() and os.access(p, os.X_OK)
+    ]
+    if candidates:
+        return candidates[0]
+
+    # Kalau belum executable, cari file biasa lalu chmod
+    candidates_raw = [
+        p for p in FLARESOLVERR_DIR.rglob("flaresolverr") if p.is_file()
+    ]
+    for p in candidates_raw:
+        try:
+            p.chmod(0o755)
+            return p
+        except Exception:
+            continue
+
+    return None
+
+
+# -----------------------------
+# Download & extract
+# -----------------------------
+def download_and_extract_flaresolverr():
     FLARESOLVERR_DIR.mkdir(exist_ok=True)
 
-    tar_path = FLARESOLVERR_DIR / "flaresolverr_linux_x64.tar.gz"
-    if not tar_path.exists():
+    if not FLARESOLVERR_TAR.exists():
         st.info("Mengunduh FlareSolverr binary, harap tunggu...")
         with requests.get(FLARESOLVERR_TARBALL_URL, stream=True, timeout=120) as r:
             r.raise_for_status()
-            with open(tar_path, "wb") as f:
+            with open(FLARESOLVERR_TAR, "wb") as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
 
-    # Extract tar.gz
     st.info("Ekstrak FlareSolverr...")
-    with tarfile.open(tar_path, "r:gz") as tar:
+    # Extract ke FLARESOLVERR_DIR, biasanya akan membuat subfolder 'flaresolverr/'
+    with tarfile.open(FLARESOLVERR_TAR, "r:gz") as tar:
         tar.extractall(path=FLARESOLVERR_DIR)
 
-    # Jadikan executable
-    if FLARESOLVERR_BINARY.exists():
-        FLARESOLVERR_BINARY.chmod(0o755)
-    else:
-        # fallback: coba cari binary di dalam folder
-        for p in FLARESOLVERR_DIR.glob("**/flaresolverr"):
-            p.chmod(0o755)
-            return p
+    # Pastikan minimal ada satu binary
+    binary_path = find_flaresolverr_binary()
+    if not binary_path:
+        files = "\n".join(list_all_files())
+        raise FileNotFoundError(
+            "Binary 'flaresolverr' tidak ditemukan setelah extract. "
+            f"File yang ada di {FLARESOLVERR_DIR}:\n{files}"
+        )
 
-    return FLARESOLVERR_BINARY
+    return binary_path
 
 
+# -----------------------------
+# Health check
+# -----------------------------
 def is_flaresolverr_healthy(timeout=3.0):
     try:
         r = requests.get(HEALTH_ENDPOINT, timeout=timeout)
@@ -62,6 +107,9 @@ def is_flaresolverr_healthy(timeout=3.0):
         return False
 
 
+# -----------------------------
+# Start process
+# -----------------------------
 def start_flaresolverr():
     """
     Start FlareSolverr sebagai proses background.
@@ -72,21 +120,31 @@ def start_flaresolverr():
     if proc is not None and proc.poll() is None:
         return
 
-    binary_path = download_flaresolverr()
+    # Pastikan sudah ter-download dan di-extract
+    binary_path = find_flaresolverr_binary()
+    if not binary_path:
+        binary_path = download_and_extract_flaresolverr()
 
-    st.info("Menjalankan FlareSolverr server...")
+    if not binary_path or not binary_path.exists():
+        files = "\n".join(list_all_files())
+        raise FileNotFoundError(
+            f"FlareSolverr binary tidak ditemukan di {FLARESOLVERR_DIR}. "
+            f"Isi folder:\n{files}"
+        )
+
+    st.info(f"Menjalankan FlareSolverr dari: {binary_path}")
 
     env = os.environ.copy()
-    # Optional: setting env dari docs
     env.setdefault("LOG_LEVEL", "info")
     env.setdefault("HEADLESS", "true")
-    # timezone & language bisa diset kalau mau
     # env.setdefault("TZ", "Asia/Singapore")
-    # env.setdefault("LANG", "en_US.UTF-8")
+
+    # Penting: cwd ke folder tempat binary berada
+    cwd = str(binary_path.parent)
 
     proc = subprocess.Popen(
         [str(binary_path)],
-        cwd=str(FLARESOLVERR_DIR),
+        cwd=cwd,
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -113,8 +171,6 @@ def ensure_flaresolverr_running():
     """
     if is_flaresolverr_healthy():
         return
-
-    # Kalau belum sehat, coba start
     start_flaresolverr()
 
 
@@ -132,11 +188,13 @@ def main():
     st.write(
         """
         UI sederhana untuk menjalankan **FlareSolverr** dan mengirim request
-        `request.get` sesuai dokumentasi API resminya.\n
+        `request.get` sesuai dokumentasi API resminya.
+
         FlareSolverr akan berjalan di `http://localhost:8191`.
         """
     )
 
+    # Pastikan server jalan (lazy-start, supaya log status kelihatan)
     with st.expander("Status FlareSolverr", expanded=True):
         if st.button("🔄 Cek status /health", type="secondary"):
             if is_flaresolverr_healthy():
@@ -149,14 +207,13 @@ def main():
                 else:
                     st.error("FlareSolverr tetap tidak sehat.")
 
-        # Tampilkan status otomatis di bawah
         healthy = is_flaresolverr_healthy()
         if healthy:
             st.success("Status saat ini: FlareSolverr **RUNNING** ✅")
         else:
             st.warning("Status saat ini: FlareSolverr **NOT RUNNING** ❌")
 
-    # Pastikan server jalan (lazy-start)
+    # Pastikan dijalankan setelah expander info
     ensure_flaresolverr_running()
 
     st.markdown("---")
@@ -202,7 +259,10 @@ def main():
 
                     headers = {"Content-Type": "application/json"}
                     resp = requests.post(
-                        API_ENDPOINT, headers=headers, json=payload, timeout=max_timeout / 1000 + 10
+                        API_ENDPOINT,
+                        headers=headers,
+                        json=payload,
+                        timeout=max_timeout / 1000 + 10,
                     )
 
                     st.write("**Status code FlareSolverr:**", resp.status_code)
@@ -216,7 +276,6 @@ def main():
                         data = resp.json()
                         st.json(data)
 
-                        # Kalau status ok & ada solution
                         if data.get("status") == "ok":
                             sol = data.get("solution", {})
                             st.success(
@@ -235,10 +294,14 @@ def main():
 
                             if not return_only_cookies:
                                 html_preview = (sol.get("response") or "")[:5000]
-                                with st.expander("Preview HTML (trimmed)", expanded=False):
+                                with st.expander(
+                                    "Preview HTML (trimmed)", expanded=False
+                                ):
                                     st.code(html_preview, language="html")
                         else:
-                            st.warning("Response bukan 'status=ok'. Lihat JSON di atas.")
+                            st.warning(
+                                "Response bukan 'status=ok'. Lihat JSON di atas."
+                            )
 
                 except Exception as e:
                     st.exception(e)
