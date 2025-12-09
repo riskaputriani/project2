@@ -9,55 +9,6 @@ from typing import Any, Awaitable, Callable, Dict, Optional
 
 import streamlit as st
 from fastapi.testclient import TestClient
-import subprocess  # <── tambahan
-
-ROOT_DIR = Path(__file__).resolve().parent
-MODULE_ROOT = ROOT_DIR / "CloudflareBypassForScraping"
-if str(MODULE_ROOT) not in sys.path:
-    sys.path.append(str(MODULE_ROOT))
-
-# ─────────────────────────────
-# BrowserForge bootstrap
-# ─────────────────────────────
-
-def ensure_browserforge_models() -> None:
-    """
-    Pastikan model BrowserForge (input-network.zip, fingerprint-network.zip, dll)
-    sudah ke-download sebelum Camoufox dipakai.
-
-    Bekerja untuk:
-    - Versi lama: `python -m browserforge update` akan mendownload file model.
-    - Versi baru: perintah ini cuma akan print "Deprecated", tapi model sudah dibundle.
-    """
-    marker = ROOT_DIR / ".browserforge_initialized"
-    if marker.exists():
-        return
-
-    try:
-        # Setara dengan menjalankan: python -m browserforge update
-        completed = subprocess.run(
-            [sys.executable, "-m", "browserforge", "update"],
-            check=False,  # jangan hard-fail kalau cuma warning/deprecated
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        print("browserforge update stdout:\n", completed.stdout)
-        print("browserforge update stderr:\n", completed.stderr)
-        marker.touch()
-    except Exception as e:
-        # Jangan matikan app hanya karena ini gagal; nanti error-nya keliatan di log.
-        print(f"⚠️ Failed to run 'python -m browserforge update': {e}")
-
-# Panggil SEBELUM import Camoufox / cf_bypasser
-ensure_browserforge_models()
-
-# ─────────────────────────────
-# Baru import cf_bypasser / Camoufox
-# ─────────────────────────────
-from cf_bypasser.core.bypasser import CamoufoxBypasser
-from cf_bypasser.server.app import create_app
-
 
 ROOT_DIR = Path(__file__).resolve().parent
 MODULE_ROOT = ROOT_DIR / "CloudflareBypassForScraping"
