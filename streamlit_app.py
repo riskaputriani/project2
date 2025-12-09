@@ -25,6 +25,7 @@ FINGERPRINTS_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 bf_download.DATA_DIRS["headers"] = HEADERS_DATA_DIR
 bf_download.DATA_DIRS["fingerprints"] = FINGERPRINTS_DATA_DIR
+bf_download.DownloadIfNotExists(headers=True, fingerprints=True)
 
 
 # --- Start of Patching Logic ---
