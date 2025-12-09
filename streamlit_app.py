@@ -1,9 +1,16 @@
 import asyncio
 import logging
+import sys
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 import streamlit as st
 from fastapi.testclient import TestClient
+
+ROOT_DIR = Path(__file__).resolve().parent
+MODULE_ROOT = ROOT_DIR / "CloudflareBypassForScraping"
+if str(MODULE_ROOT) not in sys.path:
+    sys.path.append(str(MODULE_ROOT))
 
 from cf_bypasser.core.bypasser import CamoufoxBypasser
 from cf_bypasser.server.app import create_app
