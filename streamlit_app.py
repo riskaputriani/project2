@@ -8,27 +8,33 @@ import requests
 import streamlit as st
 
 
+# ---------------------------------------------------------
+# KONFIGURASI UTAMA
+# ---------------------------------------------------------
 FLARESOLVERR_VERSION = "v3.4.6"
 FLARESOLVERR_TARBALL_URL = (
     f"https://github.com/FlareSolverr/FlareSolverr/releases/download/"
     f"{FLARESOLVERR_VERSION}/flaresolverr_linux_x64.tar.gz"
 )
 
-# Semua file disimpan di folder ini
+# Folder kerja lokal untuk binary
 FLARESOLVERR_DIR = Path("flaresolverr_bin")
 FLARESOLVERR_TAR = FLARESOLVERR_DIR / "flaresolverr_linux_x64.tar.gz"
 
+# Endpoint FlareSolverr
 FLARESOLVERR_PORT = 8191
 FLARESOLVERR_URL = f"http://localhost:{FLARESOLVERR_PORT}"
 HEALTH_ENDPOINT = f"{FLARESOLVERR_URL}/health"
 API_ENDPOINT = f"{FLARESOLVERR_URL}/v1"
 
 
-# -----------------------------
-# Helpers: binary discovery
-# -----------------------------
+# ---------------------------------------------------------
+# HELPER: DEBUG & FILE HANDLING
+# ---------------------------------------------------------
 def list_all_files():
-    """Debug helper: list semua file di folder FlareSolverr."""
+    """
+    Untuk debugging: list semua file di folder FlareSolverr.
+    """
     if not FLARESOLVERR_DIR.exists():
         return []
     return [str(p) for p in FLARESOLVERR_DIR.rglob("*")]
@@ -38,17 +44,19 @@ def find_flaresolverr_binary():
     """
     Cari file bernama 'flaresolverr' di dalam FLARESOLVERR_DIR.
     Tarball biasanya berisi folder 'flaresolverr/flaresolverr'.
+    Return: Path absolut atau None.
     """
     if not FLARESOLVERR_DIR.exists():
         return None
 
+    # Cari yang sudah executable dulu
     candidates = [
         p
         for p in FLARESOLVERR_DIR.rglob("flaresolverr")
         if p.is_file() and os.access(p, os.X_OK)
     ]
     if candidates:
-        return candidates[0]
+        return candidates[0].resolve()
 
     # Kalau belum executable, cari file biasa lalu chmod
     candidates_raw = [
@@ -57,17 +65,18 @@ def find_flaresolverr_binary():
     for p in candidates_raw:
         try:
             p.chmod(0o755)
-            return p
+            return p.resolve()
         except Exception:
             continue
 
     return None
 
 
-# -----------------------------
-# Download & extract
-# -----------------------------
 def download_and_extract_flaresolverr():
+    """
+    Download tar.gz FlareSolverr dan extract ke FLARESOLVERR_DIR.
+    Setelah itu pastikan binary ketemu.
+    """
     FLARESOLVERR_DIR.mkdir(exist_ok=True)
 
     if not FLARESOLVERR_TAR.exists():
@@ -84,7 +93,6 @@ def download_and_extract_flaresolverr():
     with tarfile.open(FLARESOLVERR_TAR, "r:gz") as tar:
         tar.extractall(path=FLARESOLVERR_DIR)
 
-    # Pastikan minimal ada satu binary
     binary_path = find_flaresolverr_binary()
     if not binary_path:
         files = "\n".join(list_all_files())
@@ -93,13 +101,16 @@ def download_and_extract_flaresolverr():
             f"File yang ada di {FLARESOLVERR_DIR}:\n{files}"
         )
 
-    return binary_path
+    return binary_path  # sudah absolute dari find_flaresolverr_binary()
 
 
-# -----------------------------
-# Health check
-# -----------------------------
+# ---------------------------------------------------------
+# HEALTH CHECK
+# ---------------------------------------------------------
 def is_flaresolverr_healthy(timeout=3.0):
+    """
+    Cek /health FlareSolverr.
+    """
     try:
         r = requests.get(HEALTH_ENDPOINT, timeout=timeout)
         return r.status_code == 200
@@ -107,9 +118,9 @@ def is_flaresolverr_healthy(timeout=3.0):
         return False
 
 
-# -----------------------------
-# Start process
-# -----------------------------
+# ---------------------------------------------------------
+# START PROSES FLARESOLVERR
+# ---------------------------------------------------------
 def start_flaresolverr():
     """
     Start FlareSolverr sebagai proses background.
@@ -125,10 +136,12 @@ def start_flaresolverr():
     if not binary_path:
         binary_path = download_and_extract_flaresolverr()
 
-    if not binary_path or not binary_path.exists():
+    binary_path = binary_path.resolve()  # pastikan absolut
+
+    if not binary_path.exists():
         files = "\n".join(list_all_files())
         raise FileNotFoundError(
-            f"FlareSolverr binary tidak ditemukan di {FLARESOLVERR_DIR}. "
+            f"FlareSolverr binary tidak ditemukan. Diharapkan di: {binary_path}\n"
             f"Isi folder:\n{files}"
         )
 
@@ -139,12 +152,11 @@ def start_flaresolverr():
     env.setdefault("HEADLESS", "true")
     # env.setdefault("TZ", "Asia/Singapore")
 
-    # Penting: cwd ke folder tempat binary berada
-    cwd = str(binary_path.parent)
-
+    # PENTING:
+    # - pakai ABSOLUTE PATH
+    # - tidak set cwd (biar tidak terjadi path double)
     proc = subprocess.Popen(
         [str(binary_path)],
-        cwd=cwd,
         env=env,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -174,9 +186,9 @@ def ensure_flaresolverr_running():
     start_flaresolverr()
 
 
-# -----------------------------
-# Streamlit UI
-# -----------------------------
+# ---------------------------------------------------------
+# STREAMLIT UI
+# ---------------------------------------------------------
 def main():
     st.set_page_config(
         page_title="FlareSolverr Streamlit Wrapper",
@@ -194,9 +206,9 @@ def main():
         """
     )
 
-    # Pastikan server jalan (lazy-start, supaya log status kelihatan)
+    # ================= STATUS SERVER =================
     with st.expander("Status FlareSolverr", expanded=True):
-        if st.button("🔄 Cek status /health", type="secondary"):
+        if st.button("🔄 Cek status /health", type="secondary", key="health_btn"):
             if is_flaresolverr_healthy():
                 st.success("FlareSolverr sehat (/health OK).")
             else:
@@ -213,10 +225,21 @@ def main():
         else:
             st.warning("Status saat ini: FlareSolverr **NOT RUNNING** ❌")
 
-    # Pastikan dijalankan setelah expander info
+    # Pastikan server dijalankan (lazy-start setelah user lihat status)
     ensure_flaresolverr_running()
 
+    # ================= DEBUG FILES =================
+    with st.expander("Debug files FlareSolverr", expanded=False):
+        if st.button("👀 Lihat isi folder flaresolverr_bin", key="debug_files_btn"):
+            files = list_all_files()
+            if not files:
+                st.write("Belum ada file di flaresolverr_bin.")
+            else:
+                st.code("\n".join(files))
+
     st.markdown("---")
+
+    # ================= FORM INPUT URL =================
     st.subheader("🌐 Kirim URL ke FlareSolverr")
 
     url = st.text_input(
@@ -241,6 +264,7 @@ def main():
             "Hanya kembalikan cookies (returnOnlyCookies)", value=False
         )
 
+    # ================= AKSI KIRIM KE FLARESOLVERR =================
     if st.button("🚀 Solve via FlareSolverr", type="primary", use_container_width=True):
         if not url:
             st.error("Mohon isi URL terlebih dahulu.")
