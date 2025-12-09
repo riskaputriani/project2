@@ -3,12 +3,29 @@ import logging
 import os
 import random
 import time
+from pathlib import Path
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
-from camoufox.async_api import AsyncCamoufox
 from playwright_captcha import CaptchaType, ClickSolver, FrameworkType
 from playwright_captcha.utils.camoufox_add_init_script.add_init_script import get_addon_path
+
+# Ensure browserforge can store datasets in a workspace-writable directory instead of site-packages.
+BROWSERFORGE_ASSETS = Path(__file__).resolve().parents[2] / "browserforge_assets"
+BROWSERFORGE_HEADERS_PATH = BROWSERFORGE_ASSETS / "headers" / "data"
+BROWSERFORGE_FINGERPRINTS_PATH = BROWSERFORGE_ASSETS / "fingerprints" / "data"
+for _path in (BROWSERFORGE_HEADERS_PATH, BROWSERFORGE_FINGERPRINTS_PATH):
+    _path.mkdir(parents=True, exist_ok=True)
+try:
+    import browserforge.download as _browserforge_download  # pip package already installed
+
+    _browserforge_download.DATA_DIRS["headers"] = BROWSERFORGE_HEADERS_PATH
+    _browserforge_download.DATA_DIRS["fingerprints"] = BROWSERFORGE_FINGERPRINTS_PATH
+    _browserforge_download.DownloadIfNotExists(headers=True, fingerprints=True)
+except Exception as exc:  # pragma: no cover
+    logging.getLogger(__name__).warning("Failed to prepare browserforge assets: %s", exc)
+
+from camoufox.async_api import AsyncCamoufox
 
 from cf_bypasser.utils.misc import md5_hash, get_browser_init_lock
 from cf_bypasser.cache.cookie_cache import CookieCache
@@ -52,7 +69,13 @@ class CamoufoxBypasser:
             self.log_message(f"Error parsing proxy {proxy}: {e}")
             return None
 
-    async def setup_browser(self, proxy: Optional[str] = None, lang: str = "en", user_agent: Optional[str] = None) -> tuple:
+    async def setup_browser(
+        self,
+        proxy: Optional[str] = None,
+        lang: str = "en-US",
+        user_agent: Optional[str] = None,
+        locale: Optional[str] = None,
+    ) -> tuple:
         """Setup Camoufox browser with random OS and configuration. Returns (browser, context, page)."""
         # Clear expired cache entries
         self.cookie_cache.clear_expired()
@@ -96,12 +119,14 @@ class CamoufoxBypasser:
 
         # Use global lock to serialize browser initialization (browserforge is not thread-safe)
         async with get_browser_init_lock():
+            locale_to_use = locale or lang
+
             camoufox = AsyncCamoufox(
                 headless=True,
                 geoip=True if proxy else False,
                 humanize=False,
                 os=selected_os,
-                locale=lang if lang else "en-US",
+                locale=locale_to_use,
                 i_know_what_im_doing=True,
                 config={'forceScopeAccess': True, **random_config},
                 disable_coop=True,

@@ -158,6 +158,6 @@ with st.expander("4. Browser automation & screenshot"):
                         "cookies_cached": len(automation_data["cookies"]),
                     }
                 )
-                st.image(automation_data["screenshot"], caption="Screenshot after bypass", use_column_width=True)
+                st.image(automation_data["screenshot"], caption="Screenshot after bypass", width=700)
             else:
                 st.error("Automation run failed after bypass attempt.")
