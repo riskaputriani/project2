@@ -30,6 +30,35 @@ import browserforge.download as bf_download
 bf_download.DATA_DIRS['headers'] = HEADERS_DATA_DIR
 bf_download.DATA_DIRS['fingerprints'] = FINGERPRINTS_DATA_DIR
 
+PLAYWRIGHT_CAPTCHA_ADDON_ROOT = ROOT_DIR / 'playwright_captcha_addon'
+
+
+def _load_local_playwright_add_init_script() -> None:
+    """Point the Camoufox addon writer at workspace storage."""
+    module_name = 'playwright_captcha.utils.camoufox_add_init_script.add_init_script'
+    module_path = PLAYWRIGHT_CAPTCHA_ADDON_ROOT / 'local_add_init_script.py'
+
+    if not module_path.exists():
+        return
+
+    pkg_name = module_name.rsplit('.', 1)[0]
+    try:
+        importlib.import_module(pkg_name)
+    except ImportError:
+        pass
+
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if not spec or not spec.loader:
+        return
+
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = pkg_name
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+
+
+_load_local_playwright_add_init_script()
+
 
 def _ensure_browserforge_package() -> None:
     spec = importlib.util.find_spec('browserforge')
