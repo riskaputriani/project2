@@ -7,13 +7,8 @@ from cf_bypasser.core.bypasser import CamoufoxBypasser
 
 
 def run_async(coro):
-    """Run an async coroutine in a fresh event loop."""
-    loop = asyncio.new_event_loop()
-    try:
-        return loop.run_until_complete(coro)
-    finally:
-        loop.run_until_complete(loop.shutdown_asyncgens())
-        loop.close()
+    """Run an async coroutine using asyncio.run for clean shutdown."""
+    return asyncio.run(coro)
 
 
 @st.cache_resource
