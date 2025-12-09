@@ -1,9 +1,4 @@
 chromium
-chromium-common
 chromium-driver
 xvfb
-dumb-init
-procps
-curl
-vim
-xauth
+git

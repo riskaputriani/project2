@@ -1,2 +1,10 @@
-streamlit>=1.40.0
-requests>=2.32.3
+streamlit
+# Dependensi utama FlareSolverr
+bottle
+selenium
+undetected-chromedriver
+requests
+websockets
+xvfbwrapper
+func_timeout
+psutil
