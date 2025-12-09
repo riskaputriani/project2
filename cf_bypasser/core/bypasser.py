@@ -199,10 +199,8 @@ class CamoufoxBypasser:
         try:
             # Navigate to the target URL
             self.log_message(f"Navigating to {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
-            
-            # Wait for page to load
-            await asyncio.sleep(8)
+            await page.goto(url, wait_until="domcontentloaded", timeout=12000)
+            await asyncio.sleep(6)
 
             # Check if we need to solve a challenge
             if await self.is_bypassed(page):
