@@ -1,5 +1,8 @@
 import asyncio
+import importlib.machinery
+import importlib.util
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
@@ -22,6 +25,42 @@ FINGERPRINTS_DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 bf_download.DATA_DIRS["headers"] = HEADERS_DATA_DIR
 bf_download.DATA_DIRS["fingerprints"] = FINGERPRINTS_DATA_DIR
+
+
+def _patch_browserforge_generator(module_name: str, data_path: Path) -> None:
+    """Patch the DATA_DIR in browserforge generator modules before they load."""
+    spec = importlib.util.find_spec(module_name)
+    if not spec or not spec.origin:
+        return
+
+    source = Path(spec.origin).read_text()
+    pattern = r"DATA_DIR: Path = .*"
+    if not re.search(pattern, source):
+        return
+
+    patched_source = re.sub(
+        pattern,
+        f"DATA_DIR: Path = Path({repr(str(data_path))})",
+        source,
+        count=1,
+    )
+
+    module_spec = importlib.machinery.ModuleSpec(
+        name=module_name, loader=None, origin=spec.origin
+    )
+    module = importlib.util.module_from_spec(module_spec)
+    module.__package__ = module_name.rpartition(".")[0]
+    module.__spec__ = module_spec
+    exec(compile(patched_source, spec.origin, "exec"), module.__dict__)
+    sys.modules[module_name] = module
+
+
+_patch_browserforge_generator(
+    "browserforge.headers.generator", HEADERS_DATA_DIR
+)
+_patch_browserforge_generator(
+    "browserforge.fingerprints.generator", FINGERPRINTS_DATA_DIR
+)
 
 from cf_bypasser.core.bypasser import CamoufoxBypasser
 from cf_bypasser.server.app import create_app
