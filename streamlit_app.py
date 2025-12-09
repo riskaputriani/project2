@@ -27,42 +27,56 @@ bf_download.DATA_DIRS["headers"] = HEADERS_DATA_DIR
 bf_download.DATA_DIRS["fingerprints"] = FINGERPRINTS_DATA_DIR
 
 
-def _patch_browserforge_generator(module_name: str, data_path: Path) -> None:
-    """Patch the DATA_DIR in browserforge generator modules before they load."""
-    spec = importlib.util.find_spec(module_name)
-    if not spec or not spec.origin:
-        return
+# --- Start of Patching Logic ---
+def _patch_browserforge_sources():
+    modules_to_patch = {
+        "browserforge.headers.generator": HEADERS_DATA_DIR,
+        "browserforge.fingerprints.generator": FINGERPRINTS_DATA_DIR,
+    }
 
-    source = Path(spec.origin).read_text(encoding='utf-8')
-    if f"Path({repr(str(data_path))})" in source:
-        return
+    for module_name, data_path in modules_to_patch.items():
+        try:
+            # Manually construct the path to the module file to avoid eager imports
+            module_path_parts = module_name.split('.')
+            base_spec = importlib.util.find_spec(module_path_parts[0])
+            if not base_spec or not base_spec.submodule_search_locations:
+                continue
 
-    pattern = r"DATA_DIR: Path = .*"
-    if not re.search(pattern, source):
-        return
+            package_dir = Path(base_spec.submodule_search_locations[0])
+            relative_path = Path(*module_path_parts[1:]).with_suffix('.py')
+            origin = package_dir / relative_path
 
-    patched_source = re.sub(
-        pattern,
-        f"DATA_DIR: Path = Path({repr(str(data_path))})",
-        source,
-        count=1,
-    )
+            if not origin.exists():
+                init_path = (package_dir / Path(*module_path_parts[1:])) / '__init__.py'
+                if init_path.exists():
+                    origin = init_path
+                else:
+                    continue
 
-    module = importlib.util.module_from_spec(spec)
-    module.__package__ = module_name.rpartition(".")[0]
-    module.__spec__ = spec
-    if spec.loader:
-        module.__loader__ = spec.loader
-    exec(compile(patched_source, spec.origin, "exec"), module.__dict__)
-    sys.modules[module_name] = module
+            source_code = origin.read_text(encoding='utf-8')
 
+            # Check if already patched
+            if "browserforge_data" in source_code:
+                continue
 
-_patch_browserforge_generator(
-    "browserforge.headers.generator", HEADERS_DATA_DIR
-)
-_patch_browserforge_generator(
-    "browserforge.fingerprints.generator", FINGERPRINTS_DATA_DIR
-)
+            pattern = r"DATA_DIR: Path = .*"
+            replacement = f"DATA_DIR: Path = Path('{data_path.as_posix()}')"
+
+            if re.search(pattern, source_code):
+                patched_code = re.sub(pattern, replacement, source_code, count=1)
+                origin.write_text(patched_code, encoding='utf-8')
+                importlib.invalidate_caches()
+
+                # Unload modules to be safe
+                if module_name in sys.modules: del sys.modules[module_name]
+                parent = module_name.rpartition('.')[0]
+                if parent in sys.modules: del sys.modules[parent]
+        except Exception:
+            pass
+
+_patch_browserforge_sources()
+# --- End of Patching Logic ---
+
 
 from cf_bypasser.core.bypasser import CamoufoxBypasser
 from cf_bypasser.server.app import create_app
