@@ -1,11 +1,2 @@
-DrissionPage==4.0.5.6
 streamlit
-playwright
-fastapi>=0.124.0
-httpx>=0.28.1
-pydantic>=2.0.0
-asyncio
-pyvirtualdisplay
-playwright-captcha
-camoufox[geoip]
-curl_cffi
+requests
