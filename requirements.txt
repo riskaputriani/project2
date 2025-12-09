@@ -1,5 +1,5 @@
 streamlit
-# Dependensi FlareSolverr Lengkap
+# --- Dependensi Utama FlareSolverr ---
 bottle
 selenium
 undetected-chromedriver
@@ -9,3 +9,4 @@ xvfbwrapper
 func_timeout
 psutil
 prometheus-client
+waitress
