@@ -282,7 +282,7 @@ async def automation_flow(
 
     handler = StreamlitLogHandler()
     handler.setLevel(logging.INFO)
-    handler.setFormatter(logging.Formatter(\"%(message)s\"))
+    handler.setFormatter(logging.Formatter("%(message)s"))
     root_logger = logging.getLogger()
     root_logger.addHandler(handler)
 
