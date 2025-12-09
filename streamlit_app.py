@@ -4,43 +4,46 @@ import os
 import sys
 import time
 import requests
+import signal
 
-# Konfigurasi
+# --- KONFIGURASI ---
 REPO_URL = "https://github.com/FlareSolverr/FlareSolverr.git"
 CLONE_DIR = "./FlareSolverr"
-PORT = 8191  # Port default FlareSolverr
+LOG_FILE = "flaresolverr.log"
+PORT = 8191
 
 st.set_page_config(page_title="FlareSolverr Controller", layout="wide")
-st.title("🔥 FlareSolverr on Streamlit Cloud")
+st.title("🔥 FlareSolverr Cloud Controller")
 
-# --- Bagian 1: Clone Repository ---
-if not os.path.exists(CLONE_DIR):
-    with st.status("Cloning FlareSolverr repository...", expanded=True) as status:
-        try:
-            subprocess.run(["git", "clone", REPO_URL, CLONE_DIR], check=True)
-            status.update(label="Repository cloned successfully!", state="complete")
-        except subprocess.CalledProcessError as e:
-            st.error(f"Failed to clone: {e}")
-            st.stop()
-else:
-    st.info("Repository FlareSolverr sudah ada.")
-
-# --- Bagian 2: Setup Environment ---
-# Kita harus memaksa FlareSolverr/Selenium menggunakan Chromium yang diinstal via packages.txt
-# Lokasi default chromium di environment Debian/Streamlit biasanya di /usr/bin/chromium
+# --- SETUP ENVIRONMENT VARIABLES ---
+# Ini krusial agar Chrome tidak crash di Streamlit Cloud
 os.environ['CHROME_BIN'] = "/usr/bin/chromium"
 os.environ['CHROMIUM_PATH'] = "/usr/bin/chromium"
-# Mencegah undetected-chromedriver mendownload chrome baru (karena kita sudah punya)
 os.environ['PUPPETEER_EXECUTABLE_PATH'] = "/usr/bin/chromium"
+# Memaksa undetected-chromedriver tidak mendownload patch baru
+os.environ['UNDETECTED_CHROMEDRIVER_MODE'] = "dist" 
 
-# --- Bagian 3: Menjalankan FlareSolverr ---
-# Kita gunakan st.cache_resource agar proses ini hanya jalan sekali (singleton)
-# meskipun user merefresh halaman browser.
-@st.cache_resource
-def start_flaresolverr():
-    # Perintah: xvfb-run python src/flaresolverr.py
-    # Kita harus menjalankan ini dari dalam folder CLONE_DIR atau menyesuaikan path
+# --- FUNGSI UTILITIES ---
+
+def install_and_clone():
+    """Clone repository jika belum ada."""
+    if not os.path.exists(CLONE_DIR):
+        with st.status("📥 Cloning FlareSolverr...", expanded=True) as status:
+            try:
+                subprocess.run(["git", "clone", REPO_URL, CLONE_DIR], check=True)
+                status.update(label="✅ Repository cloned!", state="complete")
+            except subprocess.CalledProcessError as e:
+                st.error(f"Gagal clone: {e}")
+                st.stop()
+    else:
+        st.success("📂 Repository FlareSolverr ditemukan.")
+
+def start_server():
+    """Menjalankan FlareSolverr dengan xvfb-run dan logging ke file."""
+    # Buka file log untuk menampung output
+    log_out = open(LOG_FILE, "w")
     
+    # Perintah: xvfb-run python src/flaresolverr.py
     cmd = [
         "xvfb-run", 
         "--auto-servernum", 
@@ -49,66 +52,129 @@ def start_flaresolverr():
         "src/flaresolverr.py"
     ]
     
-    # Membuka proses di background
     process = subprocess.Popen(
         cmd,
-        cwd=CLONE_DIR,  # Jalankan perintah SEOLAH-OLAH kita berada di folder ./FlareSolverr
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        env=os.environ.copy() # Teruskan env vars
+        cwd=CLONE_DIR,
+        stdout=log_out,
+        stderr=log_out,
+        env=os.environ.copy(),
+        preexec_fn=os.setsid # Agar bisa di-kill group-nya nanti
     )
-    
     return process
 
-st.write("---")
-st.subheader("Server Status")
+def get_logs():
+    """Membaca 50 baris terakhir dari log."""
+    if os.path.exists(LOG_FILE):
+        with open(LOG_FILE, "r") as f:
+            lines = f.readlines()
+            return "".join(lines[-50:])
+    return "Log file belum ada."
 
-if st.button("Start FlareSolverr"):
-    proc = start_flaresolverr()
-    st.success("Perintah start dikirim!")
+# --- UI LAYOUT ---
+
+# 1. Setup Awal
+install_and_clone()
+
+st.divider()
+
+# 2. Kontrol Server
+col1, col2 = st.columns(2)
+
+with col1:
+    st.subheader("⚙️ Server Control")
+    if "server_pid" not in st.session_state:
+        st.session_state.server_pid = None
+
+    if st.button("▶️ Start FlareSolverr", type="primary"):
+        if st.session_state.server_pid is None:
+            proc = start_server()
+            st.session_state.server_pid = proc.pid
+            st.success(f"Server dimulai dengan PID: {proc.pid}")
+            time.sleep(5) # Tunggu booting
+            st.rerun()
+        else:
+            st.warning("Server sudah berjalan (menurut session state).")
+
+    if st.button("⏹️ Stop/Kill Server"):
+        if st.session_state.server_pid:
+            try:
+                os.killpg(os.getpgid(st.session_state.server_pid), signal.SIGTERM)
+                st.session_state.server_pid = None
+                st.success("Server dimatikan.")
+            except Exception as e:
+                st.error(f"Gagal kill: {e}")
+                st.session_state.server_pid = None
+        else:
+            st.info("Tidak ada PID tersimpan.")
+
+with col2:
+    st.subheader("📊 Status Monitor")
+    st.write(f"PID Aktif: `{st.session_state.server_pid}`")
     
-    # Tunggu sebentar agar server nyala
-    time.sleep(5)
-    
-    # Cek apakah process masih jalan
-    if proc.poll() is None:
-        st.write("✅ Proses berjalan di background (PID: {})".format(proc.pid))
-    else:
-        st.error("❌ Proses mati segera setelah dijalankan.")
-        stdout, stderr = proc.communicate()
-        st.code(stderr, language="bash")
+    # Cek Health Check
+    if st.button("🏥 Check Health (localhost:8191)"):
+        try:
+            r = requests.get(f"http://localhost:{PORT}/health", timeout=5)
+            st.json(r.json())
+        except Exception as e:
+            st.error(f"Tidak bisa connect: {e}")
 
-# --- Bagian 4: Test Koneksi ke Localhost ---
-st.subheader("Test Connectivity")
-if st.button("Check Health (localhost:8191)"):
-    try:
-        # FlareSolverr berjalan di localhost port 8191
-        response = requests.get(f"http://localhost:{PORT}/health", timeout=10)
-        st.json(response.json())
-    except requests.exceptions.ConnectionError:
-        st.error(f"Gagal konek ke localhost:{PORT}. Pastikan server sudah distart.")
-    except Exception as e:
-        st.error(f"Error: {e}")
+# 3. Log Monitor
+with st.expander("📜 Lihat Server Log (Debug Error)", expanded=False):
+    if st.button("Refresh Log"):
+        pass
+    st.code(get_logs(), language="bash")
 
-# --- Bagian 5: Contoh Penggunaan (Bypass Cloudflare) ---
-st.subheader("Test Request (v1)")
-target_url = st.text_input("URL Target", "https://www.google.com")
-if st.button("Solve Request"):
+st.divider()
+
+# 4. Testing Area
+st.subheader("🚀 Test Request (Bypass)")
+
+url_target = st.text_input("URL Target", "https://www.google.com")
+if st.button("Solve Challenge"):
     payload = {
         "cmd": "request.get",
-        "url": target_url,
-        "maxTimeout": 60000
+        "url": url_target,
+        "maxTimeout": 60000,
+        # Tambahkan session agar cookie tersimpan
+        "session": "test_session_1" 
     }
     
-    try:
-        res = requests.post(f"http://localhost:{PORT}/v1", json=payload, headers={"Content-Type": "application/json"})
-        st.write("Response Status:", res.status_code)
-        if res.status_code == 200:
-            data = res.json()
-            st.json(data.get('solution', {}).get('headers', {})) # Tampilkan headers saja agar rapi
-            st.success("Berhasil mengambil data!")
-        else:
-            st.write(res.text)
-    except Exception as e:
-        st.error(str(e))
+    with st.spinner("Sedang memproses (bisa memakan waktu 10-20 detik)..."):
+        try:
+            res = requests.post(
+                f"http://localhost:{PORT}/v1", 
+                json=payload, 
+                headers={"Content-Type": "application/json"},
+                timeout=70
+            )
+            
+            st.write(f"**HTTP Status:** {res.status_code}")
+            
+            # Tampilkan RAW text dulu untuk debug jika JSON kosong
+            if res.status_code != 200:
+                 st.error("Error dari FlareSolverr:")
+                 st.text(res.text)
+            
+            # Coba parsing JSON
+            try:
+                json_data = res.json()
+                
+                # Cek status internal FlareSolverr
+                if json_data.get('status') == 'ok':
+                    st.success("✅ Berhasil!")
+                    st.json(json_data.get('solution', {}).get('headers'))
+                    with st.expander("Lihat Full JSON"):
+                        st.json(json_data)
+                else:
+                    st.error(f"❌ FlareSolverr Error: {json_data.get('message')}")
+                    st.json(json_data)
+                    
+            except ValueError:
+                st.warning("⚠️ Response bukan JSON valid. Ini raw text-nya:")
+                st.code(res.text)
+                
+        except requests.exceptions.ConnectionError:
+            st.error("❌ Gagal koneksi. Pastikan server sudah di-Start di atas.")
+        except Exception as e:
+            st.error(f"❌ Error request: {e}")
