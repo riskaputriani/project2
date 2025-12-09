@@ -29,11 +29,41 @@ bf_download.DATA_DIRS["fingerprints"] = FINGERPRINTS_DATA_DIR
 
 def _patch_browserforge_generator(module_name: str, data_path: Path) -> None:
     """Patch the DATA_DIR in browserforge generator modules before they load."""
-    spec = importlib.util.find_spec(module_name)
-    if not spec or not spec.origin:
+    module_path_parts = module_name.split('.')
+    
+    try:
+        base_spec = importlib.util.find_spec(module_path_parts[0])
+        if not base_spec or not base_spec.submodule_search_locations:
+            return
+    except (ImportError, AttributeError):
+        # Fallback to original implementation if we can't find the base spec
+        spec = importlib.util.find_spec(module_name)
+        if not spec or not spec.origin:
+            return
+        origin = Path(spec.origin)
+    else:
+        # submodule_search_locations contains the path(s) to the package directory
+        package_dir = Path(base_spec.submodule_search_locations[0])
+        
+        # Path from the package root to the target module
+        # e.g., 'headers/generator.py'
+        relative_path_to_module = Path(*module_path_parts[1:]).with_suffix('.py')
+        
+        origin = package_dir / relative_path_to_module
+
+        if not origin.exists():
+            # Handle directory-based module
+            init_path = (package_dir / Path(*module_path_parts[1:])) / '__init__.py'
+            if init_path.exists():
+                origin = init_path
+            else:
+                return # Can't find it.
+
+    try:
+        source = origin.read_text(encoding='utf-8')
+    except FileNotFoundError:
         return
 
-    source = Path(spec.origin).read_text()
     pattern = r"DATA_DIR: Path = .*"
     if not re.search(pattern, source):
         return
@@ -45,13 +75,14 @@ def _patch_browserforge_generator(module_name: str, data_path: Path) -> None:
         count=1,
     )
 
+    origin_str = str(origin)
     module_spec = importlib.machinery.ModuleSpec(
-        name=module_name, loader=None, origin=spec.origin
+        name=module_name, loader=None, origin=origin_str
     )
     module = importlib.util.module_from_spec(module_spec)
     module.__package__ = module_name.rpartition(".")[0]
     module.__spec__ = module_spec
-    exec(compile(patched_source, spec.origin, "exec"), module.__dict__)
+    exec(compile(patched_source, origin_str, "exec"), module.__dict__)
     sys.modules[module_name] = module
 
 
