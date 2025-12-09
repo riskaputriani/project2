@@ -153,10 +153,11 @@ class CamoufoxBypasser:
         try:
             # Navigate to the target URL
             self.log_message(f"Navigating to {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000) # Increased timeout
             
-            # Wait for page to load
-            await asyncio.sleep(8)
+            # Wait for page to load and challenge to appear
+            self.log_message("Waiting for potential Cloudflare challenge...")
+            await asyncio.sleep(12) # Increased sleep
 
             # Check if we need to solve a challenge
             if await self.is_bypassed(page):
@@ -169,30 +170,32 @@ class CamoufoxBypasser:
                 self.log_message("Could not determine challenge type")
                 return False
             
-            expected_selector = "#root"
+            expected_selector = "body:not(:has-text('Just a moment...'))" # A more robust selector
             captcha_container = page
-            is_solved = False                
-            async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page, max_attempts=2, attempt_delay=1) as solver:
- 
+            
+            async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page, max_attempts=3, attempt_delay=2) as solver:
                 await solver.solve_captcha(
                     captcha_container=captcha_container,
                     captcha_type=challenge_type,
-                    expected_content_selector=expected_selector,)
+                    expected_content_selector=expected_selector,
+                )
 
-                is_solved = "just a moment" not in await page.title()
-            
+            # If solve_captcha completes without exception, we assume it's solved.
+            # Double-check just in case.
+            if not await self.is_bypassed(page):
+                 self.log_message("❌ Failed to solve Cloudflare challenge, still on challenge page.")
+                 return False
 
-            if is_solved:
-                self.log_message("✅ Cloudflare challenge solved successfully!")
-                # Wait a bit more to ensure cookies are set
-                await asyncio.sleep(3)
-                return True
-            else:
-                self.log_message("❌ Failed to solve Cloudflare challenge")
-                return False
+            self.log_message("✅ Cloudflare challenge solved successfully!")
+            # Wait a bit more to ensure cookies are set and page is stable
+            await asyncio.sleep(5)
+            return True
 
         except Exception as e:
             self.log_message(f"Error solving Cloudflare challenge: {e}")
+            # Re-raise the captcha error to be handled upstream if needed
+            if "CaptchaSolvingError" in str(e):
+                raise
             return False
 
     async def get_cookies_and_user_agent(self, context, page) -> Dict[str, Any]:
