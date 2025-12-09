@@ -1,158 +1,338 @@
 import asyncio
-import time
+import logging
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 import streamlit as st
+from fastapi.testclient import TestClient
 
 from cf_bypasser.core.bypasser import CamoufoxBypasser
+from cf_bypasser.server.app import create_app
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    class _DummyTqdm:
+        def __init__(self, total: int = 0, **kwargs):
+            self.total = total
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            pass
+
+        def update(self, n: int = 1):
+            pass
+
+    tqdm = _DummyTqdm  # type: ignore
 
 
-def run_async(coro):
-    """Run an async coroutine using asyncio.run for clean shutdown."""
+st.set_page_config(page_title="Cloudflare Bypass Streamlit", layout="wide")
+st.title("Cloudflare Bypass For Scraping (Streamlit)")
+st.write(
+    "This interface mirrors the legacy FastAPI endpoints while letting you "
+    "observe the automation flow live. Each section calls the internal FastAPI "
+    "app through `TestClient`, so you keep compatibility without running Uvicorn."
+)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(levelname)s - %(name)s - %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+
+def run_async(coro: Awaitable[Any]) -> Any:
+    """Run an async coroutine cleanly from Streamlit."""
     return asyncio.run(coro)
 
 
 @st.cache_resource
-def get_bypasser():
-    """Cache a single bypasser instance for this Streamlit session."""
-    return CamoufoxBypasser(max_retries=5, log=True)
+def get_api_client() -> TestClient:
+    """Create the FastAPI TestClient once per session."""
+    return TestClient(create_app())
 
 
-bypasser = get_bypasser()
+def safe_json(response: Any) -> Dict[str, Any]:
+    try:
+        return response.json()
+    except Exception:
+        return {"detail": response.text or "Unknown error"}
 
 
-def collect_cache_stats():
-    """Return cache statistics similar to `/cache/stats`."""
-    bypasser.cookie_cache.clear_expired()
-    cache = bypasser.cookie_cache.cache
-    active_entries = sum(1 for record in cache.values() if not record.is_expired())
-    total_entries = len(cache)
-    expired_entries = total_entries - active_entries
-    hostnames = list(cache.keys())
+def describe_html_response(response: Any) -> Dict[str, Any]:
+    """Pull headers into a JSON-friendly summary for `/html`."""
+    headers = response.headers
     return {
-        "cached_entries": active_entries,
-        "expired_entries": expired_entries,
-        "total_hostnames": total_entries,
-        "hostnames": hostnames,
+        "status_code": response.status_code,
+        "final_url": headers.get("x-cf-bypasser-final-url"),
+        "user_agent": headers.get("x-cf-bypasser-user-agent"),
+        "cookie_count": headers.get("x-cf-bypasser-cookies"),
+        "processing_time_ms": headers.get("x-processing-time-ms"),
+        "content_length": len(response.text or ""),
     }
 
 
-def clear_cookie_cache():
-    """Clear all cached cookies and reset helpers."""
-    bypasser.cookie_cache.clear_all()
+def is_cloudflare_challenge(title: str, html: str) -> bool:
+    """Detect the classic Just a moment interstitial."""
+    title_lower = (title or "").lower().strip()
+    html_lower = (html or "").lower()
+    return (
+        "just a moment" in title_lower
+        or "<title>just a moment" in html_lower
+        or "please complete the captcha" in html_lower
+    )
 
 
-def summarize_html_response(data: dict, duration_ms: int) -> dict:
-    """Build a JSON-friendly payload for HTML results."""
-    return {
-        "final_url": data.get("url"),
-        "user_agent": data.get("user_agent"),
-        "cookie_count": len(data.get("cookies", {})),
-        "processing_time_ms": duration_ms,
-        "status_code": data.get("status_code"),
-    }
+async def automation_flow(
+    url: str,
+    proxy: Optional[str],
+    test_client: TestClient,
+    log_fn: Callable[[str], None],
+    progress_fn: Callable[[float], None],
+) -> Dict[str, Any]:
+    """Run the automation logic described in the UI."""
+
+    bypasser = CamoufoxBypasser(max_retries=5, log=True)
+    total_steps = 4
+    progress_counter = 0
+
+    with tqdm(total=total_steps, desc="Automation flow", leave=False) as tracker:
+        def mark_step(message: str) -> None:
+            nonlocal progress_counter
+            log_fn(message)
+            if progress_counter < total_steps:
+                progress_counter += 1
+                tracker.update(1)
+            progress_fn(min(progress_counter / total_steps, 1.0))
+
+        def finalize_progress() -> None:
+            nonlocal progress_counter
+            remaining = total_steps - progress_counter
+            if remaining > 0:
+                tracker.update(remaining)
+                progress_counter = total_steps
+            progress_fn(1.0)
+
+        mark_step("Launching browser for initial inspection")
+        cam1 = browser1 = context1 = page1 = None
+        try:
+            cam1, browser1, context1, page1 = await bypasser.setup_browser(proxy=proxy)
+            await page1.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await asyncio.sleep(2)
+            title = await page1.title()
+            html = await page1.content()
+            if not is_cloudflare_challenge(title, html):
+                mark_step("No Cloudflare challenge detected; skipping cookies")
+                mark_step("Skipping cookie injection/reload")
+                mark_step("Capturing screenshot for clean page")
+                screenshot = await page1.screenshot(full_page=True)
+                final_result = {
+                    "success": True,
+                    "title": title,
+                    "final_url": page1.url,
+                    "cloudflare_detected": False,
+                    "screenshot": screenshot,
+                    "message": "Reached the page without challenge.",
+                }
+                finalize_progress()
+                return final_result
+            log_fn("Cloudflare interstitial detected; requesting cookies")
+        except Exception as exc:  # pylint: disable=broad-except
+            finalize_progress()
+            return {"success": False, "message": f"Initial navigation failed: {exc}"}
+        finally:
+            await bypasser.cleanup_browser(cam1, browser1, context1, page1)
+
+        mark_step("Fetching cookies through /cookies endpoint")
+        try:
+            cookie_response = await asyncio.to_thread(
+                lambda: test_client.get("/cookies", params={"url": url, "proxy": proxy})
+            )
+        except Exception as exc:
+            finalize_progress()
+            return {"success": False, "message": f"Cookie request raised: {exc}", "cloudflare_detected": True}
+
+        if not cookie_response.ok:
+            detail = safe_json(cookie_response).get("detail", "Unknown error")
+            finalize_progress()
+            return {"success": False, "message": detail, "cloudflare_detected": True}
+
+        cookie_payload = cookie_response.json()
+        mark_step("Injecting retrieved cookies and reloading with new user agent")
+        cam2 = browser2 = context2 = page2 = None
+        try:
+            cam2, browser2, context2, page2 = await bypasser.setup_browser(
+                proxy=proxy, user_agent=cookie_payload.get("user_agent")
+            )
+            cookie_list = [
+                {"name": name, "value": value, "url": url}
+                for name, value in cookie_payload.get("cookies", {}).items()
+            ]
+            if cookie_list:
+                await context2.add_cookies(cookie_list)
+            await page2.goto(url, wait_until="domcontentloaded", timeout=20000)
+            await asyncio.sleep(2)
+            final_title = await page2.title()
+            final_html = await page2.content()
+            if is_cloudflare_challenge(final_title, final_html):
+                finalize_progress()
+                return {
+                    "success": False,
+                    "message": "Cloudflare challenge still present after injecting cookies.",
+                    "cloudflare_detected": True,
+                }
+            mark_step("Capturing screenshot after successful bypass")
+            screenshot = await page2.screenshot(full_page=True)
+            finalize_progress()
+            return {
+                "success": True,
+                "title": final_title,
+                "final_url": page2.url,
+                "cloudflare_detected": True,
+                "screenshot": screenshot,
+                "message": "Cloudflare bypass succeeded after cookie injection.",
+            }
+        except Exception as exc:  # pylint: disable=broad-except
+            finalize_progress()
+            return {"success": False, "message": f"Automation browser failed: {exc}", "cloudflare_detected": True}
+        finally:
+            await bypasser.cleanup_browser(cam2, browser2, context2, page2)
 
 
-st.set_page_config(page_title="Cloudflare Bypass Streamlit", layout="wide")
-st.title("Cloudflare Bypass for Scraping (Streamlit)")
-st.write(
-    "This interface exposes the same functionality as the FastAPI server but "
-    "runs entirely inside Streamlit. Each section mirrors one of the legacy "
-    "endpoints while still reusing Camoufox for Cloudflare bypassing."
-)
+def handle_api_error(response: Any, target: str) -> None:
+    """Surface API errors inside the Streamlit UI."""
+    error_detail = safe_json(response).get("detail", "Unknown error")
+    st.error(f"{target} failed: {error_detail}")
+
+
+client = get_api_client()
 
 st.markdown("---")
 
 with st.expander("1. /html endpoint"):
-    html_url = st.text_input("Target URL", key="html_url", placeholder="https://protected-site.com")
+    html_url = st.text_input("Target URL for HTML", key="html_url", placeholder="https://protected.example")
     html_proxy = st.text_input("Proxy (optional)", key="html_proxy")
-    html_bypass = st.checkbox("Force fresh cookie generation", key="html_bypass_cache")
+    html_retries = st.number_input("Retries", key="html_retries", min_value=1, max_value=10, value=5)
+    html_bypass = st.checkbox("Force fresh cookies (bypass cache)", key="html_force_bypass")
+    html_status = st.empty()
+    html_result = st.empty()
+
     if st.button("Fetch HTML", key="fetch_html_button"):
         if not html_url:
-            st.warning("Please provide a target URL before fetching HTML.")
+            html_status.warning("Please enter a target URL.")
         else:
-            with st.spinner("Generating Cloudflare cookies and fetching HTML..."):
-                start = time.perf_counter()
-                html_data = run_async(
-                    bypasser.get_or_generate_html(
-                        html_url,
-                        html_proxy if html_proxy else None,
-                        bypass_cache=html_bypass,
-                    )
-                )
-                duration = int((time.perf_counter() - start) * 1000)
-            if html_data:
-                st.success("HTML fetched successfully.")
-                st.json(summarize_html_response(html_data, duration))
-                st.code(html_data["html"][:4000] + ("...(truncated)" if len(html_data["html"]) > 4000 else ""), language="html")
+            html_status.info("Calling /html ...")
+            params = {
+                "url": html_url,
+                "retries": html_retries,
+                "bypassCookieCache": str(html_bypass).lower(),
+            }
+            if html_proxy:
+                params["proxy"] = html_proxy
+            response = client.get("/html", params=params)
+            if response.ok:
+                summary = describe_html_response(response)
+                html_status.success("HTML fetched.")
+                html_result.json(summary)
+                snippet = response.text or ""
+                html_result.code(snippet[:4000] + ("...(truncated)" if len(snippet) > 4000 else ""), language="html")
             else:
-                st.error("Failed to bypass Cloudflare and fetch HTML.")
+                html_result.empty()
+                handle_api_error(response, "/html")
 
 with st.expander("2. /cookies endpoint"):
-    cookie_url = st.text_input("Target URL", key="cookie_url", placeholder="https://protected-site.com")
+    cookie_url = st.text_input("Target URL for cookies", key="cookie_url", placeholder="https://protected.example")
     cookie_proxy = st.text_input("Proxy (optional)", key="cookie_proxy")
+    cookie_status = st.empty()
+    cookie_result = st.empty()
+
     if st.button("Fetch cookies", key="fetch_cookies_button"):
         if not cookie_url:
-            st.warning("Please provide a target URL to generate cookies.")
+            cookie_status.warning("Please enter a URL first.")
         else:
-            with st.spinner("Requesting cookies via Camoufox..."):
-                cookie_data = run_async(
-                    bypasser.get_or_generate_cookies(
-                        cookie_url,
-                        cookie_proxy if cookie_proxy else None,
-                    )
-                )
-            if cookie_data:
-                st.success("Cookies generated.")
-                st.json({"cookies": cookie_data["cookies"], "user_agent": cookie_data["user_agent"]})
+            cookie_status.info("Requesting /cookies ...")
+            params = {"url": cookie_url}
+            if cookie_proxy:
+                params["proxy"] = cookie_proxy
+            response = client.get("/cookies", params=params)
+            if response.ok:
+                cookie_status.success("Cookies received.")
+                cookie_result.json(response.json())
             else:
-                st.error("Cookie generation failed.")
+                cookie_result.empty()
+                handle_api_error(response, "/cookies")
 
 with st.expander("3. Cache stats & clear"):
-    cache_stats_button = st.button("Show cache stats", key="cache_stats_button")
-    cache_clear_button = st.button("Clear cache", key="cache_clear_button")
-    if cache_stats_button:
-        stats = collect_cache_stats()
-        st.json(stats)
-    if cache_clear_button:
-        clear_cookie_cache()
-        st.success("Cache cleared successfully.")
+    stats_result = st.empty()
+    clear_result = st.empty()
+    col_stats, col_clear = st.columns(2)
+    if col_stats.button("Show cache stats", key="cache_stats_button"):
+        stats_result.info("Requesting /cache/stats ...")
+        response = client.get("/cache/stats")
+        if response.ok:
+            stats_result.success("Cache stats")
+            stats_result.json(response.json())
+        else:
+            stats_result.empty()
+            handle_api_error(response, "/cache/stats")
+    if col_clear.button("Clear cache", key="cache_clear_button"):
+        clear_result.info("Requesting /cache/clear ...")
+        response = client.post("/cache/clear")
+        if response.ok:
+            clear_result.success("Cache cleared.")
+            clear_result.json(response.json())
+        else:
+            clear_result.empty()
+            handle_api_error(response, "/cache/clear")
 
 with st.expander("4. Browser automation & screenshot"):
     automation_url = st.text_input("Automation target URL", key="automation_url")
     automation_proxy = st.text_input("Proxy (optional)", key="automation_proxy")
-    click_selector = st.text_input(
-        "Optional CSS selector to click after bypassing CF (e.g. button#submit)",
-        key="automation_click_selector",
-    )
-    wait_selector = st.text_input(
-        "Optional CSS selector to wait for after click (leave empty to skip)",
-        key="automation_wait_selector",
-    )
-    automation_bypass_cache = st.checkbox("Force fresh cookies before automation", key="automation_bypass")
+    automation_status = st.empty()
+    automation_log = st.empty()
+    automation_progress = st.progress(0.0)
+    automation_output = st.empty()
+
     if st.button("Run automation", key="automation_run_button"):
+        automation_log.text("Preparing automation log...")
+        log_lines = []
+
+        def append_log(message: str) -> None:
+            log_lines.append(message)
+            automation_log.info("\n".join(log_lines))
+
+        automation_progress.progress(0.0)
+        automation_output.empty()
+
         if not automation_url:
-            st.warning("Provide a URL to run automation.")
+            automation_status.warning("Please enter a URL to automate.")
         else:
-            with st.spinner("Launching Camoufox automation..."):
-                automation_data = run_async(
-                    bypasser.run_automation(
+            automation_status.info("Starting automation...")
+            try:
+                automation_result = run_async(
+                    automation_flow(
                         automation_url,
-                        proxy=automation_proxy if automation_proxy else None,
-                        click_selector=click_selector if click_selector else None,
-                        wait_selector=wait_selector if wait_selector else None,
-                        bypass_cache=automation_bypass_cache,
+                        automation_proxy if automation_proxy else None,
+                        client,
+                        log_fn=append_log,
+                        progress_fn=automation_progress.progress,
                     )
                 )
-            if automation_data:
-                st.success("Automation complete.")
-                st.json(
-                    {
-                        "title": automation_data["title"],
-                        "url": automation_data["url"],
-                        "user_agent": automation_data["user_agent"],
-                        "cookies_cached": len(automation_data["cookies"]),
-                    }
-                )
-                st.image(automation_data["screenshot"], caption="Screenshot after bypass", width=700)
+            except Exception as exc:  # pylint: disable=broad-except
+                automation_status.error(f"Automation crashed: {exc}")
             else:
-                st.error("Automation run failed after bypass attempt.")
+                if automation_result.get("success"):
+                    automation_status.success(automation_result.get("message"))
+                    automation_output.json(
+                        {
+                            "title": automation_result.get("title"),
+                            "final_url": automation_result.get("final_url"),
+                            "cloudflare_challenge": automation_result.get("cloudflare_detected"),
+                        }
+                    )
+                    screenshot_data = automation_result.get("screenshot")
+                    if screenshot_data:
+                        st.image(screenshot_data, caption="Screenshot after automation", use_column_width=True)
+                else:
+                    automation_status.error(automation_result.get("message"))

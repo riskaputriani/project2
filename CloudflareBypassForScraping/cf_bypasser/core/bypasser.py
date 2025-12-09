@@ -1,51 +1,14 @@
 import asyncio
-import importlib
-import importlib.util
 import logging
 import os
 import random
 import time
-from pathlib import Path
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
 
+from camoufox.async_api import AsyncCamoufox
 from playwright_captcha import CaptchaType, ClickSolver, FrameworkType
 from playwright_captcha.utils.camoufox_add_init_script.add_init_script import get_addon_path
-
-# Ensure browserforge can store datasets in a workspace-writable directory instead of site-packages.
-BROWSERFORGE_ASSETS = Path(__file__).resolve().parents[2] / "browserforge_assets"
-BROWSERFORGE_HEADERS_PATH = BROWSERFORGE_ASSETS / "headers" / "data"
-BROWSERFORGE_FINGERPRINTS_PATH = BROWSERFORGE_ASSETS / "fingerprints" / "data"
-for _path in (BROWSERFORGE_HEADERS_PATH, BROWSERFORGE_FINGERPRINTS_PATH):
-    _path.mkdir(parents=True, exist_ok=True)
-
-_browserforge_assets_configured = False
-
-def ensure_browserforge_assets():
-    """Configure browserforge download paths so files land in the workspace."""
-    global _browserforge_assets_configured
-    if _browserforge_assets_configured:
-        return
-
-    spec = importlib.util.find_spec("browserforge.download")
-    if spec is None:
-        logging.getLogger(__name__).info("browserforge.download spec not found, skipping asset prep")
-        return
-
-    try:
-        _browserforge_download = importlib.import_module("browserforge.download")
-        _browserforge_download.DATA_DIRS["headers"] = BROWSERFORGE_HEADERS_PATH
-        _browserforge_download.DATA_DIRS["fingerprints"] = BROWSERFORGE_FINGERPRINTS_PATH
-        _browserforge_download.DownloadIfNotExists(headers=True, fingerprints=True)
-        _browserforge_assets_configured = True
-    except Exception as exc:  # pragma: no cover
-        logging.getLogger(__name__).warning(
-            "Failed to prepare browserforge assets: %s", exc, exc_info=False
-        )
-
-from camoufox.async_api import AsyncCamoufox
-
-from camoufox.async_api import AsyncCamoufox
 
 from cf_bypasser.utils.misc import md5_hash, get_browser_init_lock
 from cf_bypasser.cache.cookie_cache import CookieCache
@@ -89,15 +52,8 @@ class CamoufoxBypasser:
             self.log_message(f"Error parsing proxy {proxy}: {e}")
             return None
 
-    async def setup_browser(
-        self,
-        proxy: Optional[str] = None,
-        lang: str = "en-US",
-        user_agent: Optional[str] = None,
-        locale: Optional[str] = None,
-    ) -> tuple:
+    async def setup_browser(self, proxy: Optional[str] = None, lang: str = "en", user_agent: Optional[str] = None) -> tuple:
         """Setup Camoufox browser with random OS and configuration. Returns (browser, context, page)."""
-        ensure_browserforge_assets()
         # Clear expired cache entries
         self.cookie_cache.clear_expired()
         
@@ -140,14 +96,12 @@ class CamoufoxBypasser:
 
         # Use global lock to serialize browser initialization (browserforge is not thread-safe)
         async with get_browser_init_lock():
-            locale_to_use = locale or lang
-
             camoufox = AsyncCamoufox(
                 headless=True,
                 geoip=True if proxy else False,
                 humanize=False,
                 os=selected_os,
-                locale=locale_to_use,
+                locale=lang if lang else "en-US",
                 i_know_what_im_doing=True,
                 config={'forceScopeAccess': True, **random_config},
                 disable_coop=True,
@@ -195,11 +149,14 @@ class CamoufoxBypasser:
             return None
 
     async def solve_cloudflare_challenge(self, url: str, page) -> bool:
-        """Navigate to URL and solve Cloudflare challenge, with enhanced Turnstile handling."""
+        """Navigate to URL and solve Cloudflare challenge using playwright-captcha."""
         try:
+            # Navigate to the target URL
             self.log_message(f"Navigating to {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(5)
+            await page.goto(url, wait_until="domcontentloaded", timeout=10000)
+            
+            # Wait for page to load
+            await asyncio.sleep(8)
 
             # Check if we need to solve a challenge
             if await self.is_bypassed(page):
@@ -207,45 +164,32 @@ class CamoufoxBypasser:
                 return True
 
             self.log_message("Cloudflare challenge detected. Attempting to solve...")
+            challenge_type = await self.determine_challenge_type(page)
+            if not challenge_type:
+                self.log_message("Could not determine challenge type")
+                return False
             
-            # Increased timeout for challenge page
-            await page.wait_for_load_state("networkidle", timeout=20000)
+            expected_selector = "#root"
+            captcha_container = page
+            is_solved = False                
+            async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page, max_attempts=2, attempt_delay=1) as solver:
+ 
+                await solver.solve_captcha(
+                    captcha_container=captcha_container,
+                    captcha_type=challenge_type,
+                    expected_content_selector=expected_selector,)
 
-            # --- Enhanced Turnstile Handling ---
-            try:
-                turnstile_iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com/turnstile"]')
-                await turnstile_iframe.locator('input[type="checkbox"]').click(timeout=10000)
-                self.log_message("Clicked the Turnstile checkbox.")
-            except Exception:
-                self.log_message("Could not find or click Turnstile checkbox, proceeding with general solver.")
+                is_solved = "just a moment" not in await page.title()
+            
 
-            # General solver as a fallback and for other challenges
-            try:
-                challenge_type = await self.determine_challenge_type(page)
-                if challenge_type:
-                    async with ClickSolver(page=page) as solver:
-                        await solver.solve_captcha(captcha_type=challenge_type, max_attempts=1)
-            except Exception as e:
-                self.log_message(f"General captcha solver failed: {e}")
-
-            # --- Reliable success check: Wait for cf_clearance cookie ---
-            self.log_message("Waiting for cf_clearance cookie...")
-            start_time = time.time()
-            while time.time() - start_time < 45:  # Wait up to 45 seconds
-                cookies = await page.context.cookies()
-                if any(cookie['name'] == 'cf_clearance' for cookie in cookies):
-                    self.log_message("✅ Cloudflare challenge solved successfully! (cf_clearance cookie found)")
-                    await asyncio.sleep(3)  # Allow page to settle
-                    return True
-                await asyncio.sleep(1)
-
-            # Final check if bypassed
-            if await self.is_bypassed(page):
-                 self.log_message("✅ Cloudflare challenge solved successfully! (page content check)")
-                 return True
-
-            self.log_message("❌ Failed to solve Cloudflare challenge (cf_clearance cookie not found after timeout).")
-            return False
+            if is_solved:
+                self.log_message("✅ Cloudflare challenge solved successfully!")
+                # Wait a bit more to ensure cookies are set
+                await asyncio.sleep(3)
+                return True
+            else:
+                self.log_message("❌ Failed to solve Cloudflare challenge")
+                return False
 
         except Exception as e:
             self.log_message(f"Error solving Cloudflare challenge: {e}")
@@ -364,19 +308,25 @@ class CamoufoxBypasser:
         page = None
         
         try:
+            # Setup browser and solve challenge
             camoufox, browser, context, page = await self.setup_browser(proxy, user_agent=cached_ua)
             
             if cached_cookies:
                 self.log_message("Restoring cached cookies...")
-                cookie_list = [
-                    {'name': name, 'value': value, 'url': url}
-                    for name, value in cached_cookies.items()
-                ]
+                # Convert dict to list of cookie objects
+                cookie_list = []
+                for name, value in cached_cookies.items():
+                    cookie_list.append({
+                        'name': name,
+                        'value': value,
+                        'url': url  # Use the target URL for the cookie
+                    })
                 await context.add_cookies(cookie_list)
             
             if await self.solve_cloudflare_challenge(url, page):
                 data = await self.get_html_content_and_cookies(context, page)
                 if data and data["cookies"]:
+                    # Cache the cookies for future use
                     self.cookie_cache.set(cache_key, data["cookies"], data["user_agent"])
                     return data
             
@@ -384,84 +334,6 @@ class CamoufoxBypasser:
             
         except Exception as e:
             self.log_message(f"Error in get_or_generate_html: {e}")
-            return None
-        finally:
-            await self.cleanup_browser(camoufox, browser, context, page)
-
-    async def run_automation(
-        self,
-        url: str,
-        proxy: Optional[str] = None,
-        click_selector: Optional[str] = None,
-        wait_selector: Optional[str] = None,
-        bypass_cache: bool = False
-    ) -> Optional[Dict[str, Any]]:
-        """Run automation after bypassing Cloudflare, optionally hitting a selector."""
-        hostname = urlparse(url).netloc
-        cache_key = md5_hash(hostname + proxy if proxy else "")
-
-        cached_cookies = None
-        cached_ua = None
-
-        if not bypass_cache:
-            cached = self.cookie_cache.get(cache_key)
-            if cached:
-                cached_cookies = cached.cookies
-                cached_ua = cached.user_agent
-
-        camoufox = None
-        browser = None
-        context = None
-        page = None
-
-        try:
-            camoufox, browser, context, page = await self.setup_browser(proxy, user_agent=cached_ua)
-
-            if cached_cookies:
-                cookie_list = [
-                    {'name': name, 'value': value, 'url': url}
-                    for name, value in cached_cookies.items()
-                ]
-                await context.add_cookies(cookie_list)
-
-            if not await self.solve_cloudflare_challenge(url, page):
-                return None
-
-            await page.wait_for_load_state("networkidle", timeout=15000)
-
-            if click_selector:
-                try:
-                    await page.click(click_selector, timeout=5000)
-                    await page.wait_for_load_state("networkidle", timeout=10000)
-                except Exception as e:
-                    self.log_message(f"Click selector '{click_selector}' failed: {e}")
-
-            if wait_selector:
-                try:
-                    await page.wait_for_selector(wait_selector, timeout=10000)
-                except Exception as e:
-                    self.log_message(f"Waiting for selector '{wait_selector}' failed: {e}")
-
-            title = await page.title()
-            final_url = page.url
-            screenshot = await page.screenshot(full_page=True)
-            cookies = await context.cookies()
-            cookie_dict = {cookie["name"]: cookie["value"] for cookie in cookies}
-            user_agent = await page.evaluate("navigator.userAgent")
-
-            if cookie_dict:
-                self.cookie_cache.set(cache_key, cookie_dict, user_agent)
-
-            return {
-                "title": title,
-                "url": final_url,
-                "user_agent": user_agent,
-                "cookies": cookie_dict,
-                "screenshot": screenshot
-            }
-
-        except Exception as e:
-            self.log_message(f"Error running automation: {e}")
             return None
         finally:
             await self.cleanup_browser(camoufox, browser, context, page)
