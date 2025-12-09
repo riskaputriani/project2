@@ -195,12 +195,11 @@ class CamoufoxBypasser:
             return None
 
     async def solve_cloudflare_challenge(self, url: str, page) -> bool:
-        """Navigate to URL and solve Cloudflare challenge using playwright-captcha."""
+        """Navigate to URL and solve Cloudflare challenge, with enhanced Turnstile handling."""
         try:
-            # Navigate to the target URL
             self.log_message(f"Navigating to {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=12000)
-            await asyncio.sleep(6)
+            await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            await asyncio.sleep(5)
 
             # Check if we need to solve a challenge
             if await self.is_bypassed(page):
@@ -208,32 +207,45 @@ class CamoufoxBypasser:
                 return True
 
             self.log_message("Cloudflare challenge detected. Attempting to solve...")
-            challenge_type = await self.determine_challenge_type(page)
-            if not challenge_type:
-                self.log_message("Could not determine challenge type")
-                return False
             
-            expected_selector = "#root"
-            captcha_container = page
-            is_solved = False                
-            async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page, max_attempts=2, attempt_delay=1) as solver:
- 
-                await solver.solve_captcha(
-                    captcha_container=captcha_container,
-                    captcha_type=challenge_type,
-                    expected_content_selector=expected_selector,)
+            # Increased timeout for challenge page
+            await page.wait_for_load_state("networkidle", timeout=20000)
 
-                is_solved = "just a moment" not in await page.title()
-            
+            # --- Enhanced Turnstile Handling ---
+            try:
+                turnstile_iframe = page.frame_locator('iframe[src*="challenges.cloudflare.com/turnstile"]')
+                await turnstile_iframe.locator('input[type="checkbox"]').click(timeout=10000)
+                self.log_message("Clicked the Turnstile checkbox.")
+            except Exception:
+                self.log_message("Could not find or click Turnstile checkbox, proceeding with general solver.")
 
-            if is_solved:
-                self.log_message("✅ Cloudflare challenge solved successfully!")
-                # Wait a bit more to ensure cookies are set
-                await asyncio.sleep(3)
-                return True
-            else:
-                self.log_message("❌ Failed to solve Cloudflare challenge")
-                return False
+            # General solver as a fallback and for other challenges
+            try:
+                challenge_type = await self.determine_challenge_type(page)
+                if challenge_type:
+                    async with ClickSolver(page=page) as solver:
+                        await solver.solve_captcha(captcha_type=challenge_type, max_attempts=1)
+            except Exception as e:
+                self.log_message(f"General captcha solver failed: {e}")
+
+            # --- Reliable success check: Wait for cf_clearance cookie ---
+            self.log_message("Waiting for cf_clearance cookie...")
+            start_time = time.time()
+            while time.time() - start_time < 45:  # Wait up to 45 seconds
+                cookies = await page.context.cookies()
+                if any(cookie['name'] == 'cf_clearance' for cookie in cookies):
+                    self.log_message("✅ Cloudflare challenge solved successfully! (cf_clearance cookie found)")
+                    await asyncio.sleep(3)  # Allow page to settle
+                    return True
+                await asyncio.sleep(1)
+
+            # Final check if bypassed
+            if await self.is_bypassed(page):
+                 self.log_message("✅ Cloudflare challenge solved successfully! (page content check)")
+                 return True
+
+            self.log_message("❌ Failed to solve Cloudflare challenge (cf_clearance cookie not found after timeout).")
+            return False
 
         except Exception as e:
             self.log_message(f"Error solving Cloudflare challenge: {e}")
