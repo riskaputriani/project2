@@ -1,4 +1,6 @@
 import asyncio
+import importlib
+import importlib.util
 import logging
 import os
 import random
@@ -16,14 +18,32 @@ BROWSERFORGE_HEADERS_PATH = BROWSERFORGE_ASSETS / "headers" / "data"
 BROWSERFORGE_FINGERPRINTS_PATH = BROWSERFORGE_ASSETS / "fingerprints" / "data"
 for _path in (BROWSERFORGE_HEADERS_PATH, BROWSERFORGE_FINGERPRINTS_PATH):
     _path.mkdir(parents=True, exist_ok=True)
-try:
-    import browserforge.download as _browserforge_download  # pip package already installed
 
-    _browserforge_download.DATA_DIRS["headers"] = BROWSERFORGE_HEADERS_PATH
-    _browserforge_download.DATA_DIRS["fingerprints"] = BROWSERFORGE_FINGERPRINTS_PATH
-    _browserforge_download.DownloadIfNotExists(headers=True, fingerprints=True)
-except Exception as exc:  # pragma: no cover
-    logging.getLogger(__name__).warning("Failed to prepare browserforge assets: %s", exc)
+_browserforge_assets_configured = False
+
+def ensure_browserforge_assets():
+    """Configure browserforge download paths so files land in the workspace."""
+    global _browserforge_assets_configured
+    if _browserforge_assets_configured:
+        return
+
+    spec = importlib.util.find_spec("browserforge.download")
+    if spec is None:
+        logging.getLogger(__name__).info("browserforge.download spec not found, skipping asset prep")
+        return
+
+    try:
+        _browserforge_download = importlib.import_module("browserforge.download")
+        _browserforge_download.DATA_DIRS["headers"] = BROWSERFORGE_HEADERS_PATH
+        _browserforge_download.DATA_DIRS["fingerprints"] = BROWSERFORGE_FINGERPRINTS_PATH
+        _browserforge_download.DownloadIfNotExists(headers=True, fingerprints=True)
+        _browserforge_assets_configured = True
+    except Exception as exc:  # pragma: no cover
+        logging.getLogger(__name__).warning(
+            "Failed to prepare browserforge assets: %s", exc, exc_info=False
+        )
+
+from camoufox.async_api import AsyncCamoufox
 
 from camoufox.async_api import AsyncCamoufox
 
@@ -77,6 +97,7 @@ class CamoufoxBypasser:
         locale: Optional[str] = None,
     ) -> tuple:
         """Setup Camoufox browser with random OS and configuration. Returns (browser, context, page)."""
+        ensure_browserforge_assets()
         # Clear expired cache entries
         self.cookie_cache.clear_expired()
         
