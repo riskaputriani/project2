@@ -273,6 +273,19 @@ async def automation_flow(
     cam1 = browser1 = context1 = page1 = None
     cam2 = browser2 = context2 = page2 = None
 
+    class StreamlitLogHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            try:
+                log_fn(f\"{record.levelname}: {record.getMessage()}\")
+            except RuntimeError:
+                pass
+
+    handler = StreamlitLogHandler()
+    handler.setLevel(logging.INFO)
+    handler.setFormatter(logging.Formatter(\"%(message)s\"))
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+
     try:
         mark_step('Launching browser for initial inspection')
         cam1, browser1, context1, page1 = await bypasser.setup_browser(proxy=proxy, lang='en-US')
@@ -343,6 +356,7 @@ async def automation_flow(
             'cloudflare_detected': True,
         }
     finally:
+        root_logger.removeHandler(handler)
         await bypasser.cleanup_browser(cam1, browser1, context1, page1)
         await bypasser.cleanup_browser(cam2, browser2, context2, page2)
 

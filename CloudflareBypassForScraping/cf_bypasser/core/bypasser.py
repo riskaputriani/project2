@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 import time
 from typing import Optional, Dict, Any
 from urllib.parse import urlparse
@@ -149,7 +150,7 @@ class CamoufoxBypasser:
             return None
 
     async def solve_cloudflare_challenge(self, url: str, page) -> bool:
-        """Navigate to URL and solve Cloudflare challenge manually."""
+        """Navigate to URL and solve Cloudflare challenge manually or via ClickSolver."""
         try:
             self.log_message(f"Navigating to {url}")
             await page.goto(url, wait_until="domcontentloaded", timeout=20000)
@@ -161,73 +162,116 @@ class CamoufoxBypasser:
                 self.log_message("No Cloudflare challenge detected or already bypassed")
                 return True
 
-            self.log_message("Cloudflare challenge detected. Attempting to solve manually...")
-            
-            for attempt in range(3):
-                self.log_message(f"Manual attempt {attempt + 1}...")
-                try:
-                    # Find the iframe
-                    iframe = None
-                    for frame in page.frames:
-                        try:
-                            if "cloudflare" in (await frame.title()).lower():
-                                iframe = frame
-                                break
-                        except Exception:
-                            continue
-                    
-                    if not iframe:
-                         # Fallback for finding iframe by name
-                         for frame in page.frames:
-                            try:
-                                if frame.name and re.match(r"c-[a-z0-9]+", frame.name):
-                                    iframe = frame
-                                    break
-                            except Exception:
-                                continue
+            self.log_message("Cloudflare challenge detected. Attempting ClickSolver...")
+            challenge_type = await self.determine_challenge_type(page) or CaptchaType.CLOUDFLARE_INTERSTITIAL
+            if await self._solve_with_click_solver(page, challenge_type):
+                return True
 
-                    if iframe:
-                        self.log_message("Found Cloudflare iframe.")
-                        
-                        checkbox = iframe.locator("input[type=checkbox]")
-                        if await checkbox.is_visible(timeout=5000):
-                            self.log_message("Found checkbox. Performing human-like click.")
-                            
-                            box = await checkbox.bounding_box()
-                            if box:
-                                await page.mouse.move(
-                                    box['x'] + box['width'] / 2 + random.uniform(-5, 5),
-                                    box['y'] + box['height'] / 2 + random.uniform(-5, 5),
-                                    steps=10
-                                )
-                                await page.mouse.down()
-                                await asyncio.sleep(random.uniform(0.1, 0.3))
-                                await page.mouse.up()
+            self.log_message("ClickSolver failed; falling back to manual clicks.")
+            if await self._manual_solve_cloudflare(page):
+                return True
 
-                                # Wait for the page to reload or change
-                                await asyncio.sleep(10)
-                                
-                                if await self.is_bypassed(page):
-                                    self.log_message("✅ Cloudflare challenge solved successfully!")
-                                    await asyncio.sleep(5)
-                                    return True
-                                else:
-                                    self.log_message("Challenge not solved after click.")
-                        else:
-                            self.log_message("Checkbox not visible in iframe.")
-                    else:
-                        self.log_message("Could not find Cloudflare iframe.")
-                except Exception as e:
-                    self.log_message(f"Error in manual attempt: {e}")
-                
-                await asyncio.sleep(3) # Wait before next attempt
-
-            self.log_message("❌ Failed to solve Cloudflare challenge manually after all attempts.")
+            self.log_message("Failed to solve Cloudflare challenge after all attempts.")
             return False
 
         except Exception as e:
             self.log_message(f"Error solving Cloudflare challenge: {e}")
             return False
+
+    async def _solve_with_click_solver(self, page, challenge_type: CaptchaType) -> bool:
+        """Try solving the challenge with ClickSolver, reloading once if needed."""
+        for attempt_num in range(2):
+            if attempt_num > 0:
+                self.log_message("Reloading page before retrying ClickSolver...")
+                try:
+                    await page.reload()
+                except Exception as exc:
+                    self.log_message(f"Reload failed: {exc}")
+                await asyncio.sleep(6)
+
+            if await self._run_click_solver_once(page, challenge_type):
+                return True
+
+        return False
+
+    async def _run_click_solver_once(self, page, challenge_type: CaptchaType) -> bool:
+        """One ClickSolver pass with relaxed timing."""
+        try:
+            async with ClickSolver(
+                FrameworkType.CAMOUFOX,
+                page,
+                max_attempts=6,
+                attempt_delay=6
+            ) as solver:
+                await solver.solve_captcha(page, challenge_type)
+        except Exception as exc:
+            self.log_message(f"ClickSolver raised an exception: {exc}")
+            return False
+
+        await asyncio.sleep(5)
+        if await self.is_bypassed(page):
+            self.log_message("ClickSolver solved the challenge.")
+            return True
+
+        self.log_message("ClickSolver did not clear the challenge.")
+        return False
+
+    async def _manual_solve_cloudflare(self, page) -> bool:
+        """Old manual checkbox-click fallback in case solver does not find the iframe."""
+        for attempt in range(3):
+            self.log_message(f"Manual attempt {attempt + 1}...")
+            try:
+                iframe = None
+                for frame in page.frames:
+                    try:
+                        if "cloudflare" in (await frame.title()).lower():
+                            iframe = frame
+                            break
+                    except Exception:
+                        continue
+
+                if not iframe:
+                    for frame in page.frames:
+                        try:
+                            if frame.name and re.match(r"c-[a-z0-9]+", frame.name):
+                                iframe = frame
+                                break
+                        except Exception:
+                            continue
+
+                if iframe:
+                    self.log_message("Found Cloudflare iframe.")
+                    checkbox = iframe.locator("input[type=checkbox]")
+                    if await checkbox.is_visible(timeout=5000):
+                        self.log_message("Checkbox visible; performing human-like click.")
+                        box = await checkbox.bounding_box()
+                        if box:
+                            await page.mouse.move(
+                                box["x"] + box["width"] / 2 + random.uniform(-5, 5),
+                                box["y"] + box["height"] / 2 + random.uniform(-5, 5),
+                                steps=10
+                            )
+                            await page.mouse.down()
+                            await asyncio.sleep(random.uniform(0.1, 0.3))
+                            await page.mouse.up()
+
+                            await asyncio.sleep(10)
+                            if await self.is_bypassed(page):
+                                self.log_message("Manual click solved the challenge.")
+                                await asyncio.sleep(5)
+                                return True
+                            self.log_message("Challenge still present after manual click.")
+                    else:
+                        self.log_message("Checkbox not visible in iframe.")
+                else:
+                    self.log_message("Could not find Cloudflare iframe.")
+            except Exception as e:
+                self.log_message(f"Error in manual attempt: {e}")
+
+            await asyncio.sleep(3)
+
+        self.log_message("Manual attempts exhausted without success.")
+        return False
 
     async def get_cookies_and_user_agent(self, context, page) -> Dict[str, Any]:
         """Get cookies and user agent after successful bypass."""
