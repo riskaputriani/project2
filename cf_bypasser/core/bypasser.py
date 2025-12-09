@@ -308,25 +308,19 @@ class CamoufoxBypasser:
         page = None
         
         try:
-            # Setup browser and solve challenge
             camoufox, browser, context, page = await self.setup_browser(proxy, user_agent=cached_ua)
             
             if cached_cookies:
                 self.log_message("Restoring cached cookies...")
-                # Convert dict to list of cookie objects
-                cookie_list = []
-                for name, value in cached_cookies.items():
-                    cookie_list.append({
-                        'name': name,
-                        'value': value,
-                        'url': url  # Use the target URL for the cookie
-                    })
+                cookie_list = [
+                    {'name': name, 'value': value, 'url': url}
+                    for name, value in cached_cookies.items()
+                ]
                 await context.add_cookies(cookie_list)
             
             if await self.solve_cloudflare_challenge(url, page):
                 data = await self.get_html_content_and_cookies(context, page)
                 if data and data["cookies"]:
-                    # Cache the cookies for future use
                     self.cookie_cache.set(cache_key, data["cookies"], data["user_agent"])
                     return data
             
@@ -335,8 +329,8 @@ class CamoufoxBypasser:
         except Exception as e:
             self.log_message(f"Error in get_or_generate_html: {e}")
             return None
-            finally:
-                await self.cleanup_browser(camoufox, browser, context, page)
+        finally:
+            await self.cleanup_browser(camoufox, browser, context, page)
 
     async def run_automation(
         self,
