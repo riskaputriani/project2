@@ -276,7 +276,7 @@ async def automation_flow(
     class StreamlitLogHandler(logging.Handler):
         def emit(self, record: logging.LogRecord) -> None:
             try:
-                log_fn(f\"{record.levelname}: {record.getMessage()}\")
+                log_fn(f"{record.levelname}: {record.getMessage()}")
             except RuntimeError:
                 pass
 
