@@ -12,6 +12,17 @@ MODULE_ROOT = ROOT_DIR / "CloudflareBypassForScraping"
 if str(MODULE_ROOT) not in sys.path:
     sys.path.append(str(MODULE_ROOT))
 
+import browserforge.download as bf_download
+
+BROWSERFORGE_DATA_ROOT = ROOT_DIR / "browserforge_data"
+HEADERS_DATA_DIR = BROWSERFORGE_DATA_ROOT / "headers" / "data"
+FINGERPRINTS_DATA_DIR = BROWSERFORGE_DATA_ROOT / "fingerprints" / "data"
+HEADERS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+FINGERPRINTS_DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+bf_download.DATA_DIRS["headers"] = HEADERS_DATA_DIR
+bf_download.DATA_DIRS["fingerprints"] = FINGERPRINTS_DATA_DIR
+
 from cf_bypasser.core.bypasser import CamoufoxBypasser
 from cf_bypasser.server.app import create_app
 
