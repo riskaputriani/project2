@@ -149,53 +149,84 @@ class CamoufoxBypasser:
             return None
 
     async def solve_cloudflare_challenge(self, url: str, page) -> bool:
-        """Navigate to URL and solve Cloudflare challenge using playwright-captcha."""
+        """Navigate to URL and solve Cloudflare challenge manually."""
         try:
-            # Navigate to the target URL
             self.log_message(f"Navigating to {url}")
-            await page.goto(url, wait_until="domcontentloaded", timeout=20000) # Increased timeout
+            await page.goto(url, wait_until="domcontentloaded", timeout=20000)
             
-            # Wait for page to load and challenge to appear
             self.log_message("Waiting for potential Cloudflare challenge...")
-            await asyncio.sleep(12) # Increased sleep
+            await asyncio.sleep(12)
 
-            # Check if we need to solve a challenge
             if await self.is_bypassed(page):
                 self.log_message("No Cloudflare challenge detected or already bypassed")
                 return True
 
-            self.log_message("Cloudflare challenge detected. Attempting to solve...")
-            challenge_type = await self.determine_challenge_type(page)
-            if not challenge_type:
-                self.log_message("Could not determine challenge type")
-                return False
+            self.log_message("Cloudflare challenge detected. Attempting to solve manually...")
             
-            expected_selector = "body:not(:has-text('Just a moment...'))" # A more robust selector
-            captcha_container = page
-            
-            async with ClickSolver(framework=FrameworkType.CAMOUFOX, page=page, max_attempts=3, attempt_delay=2) as solver:
-                await solver.solve_captcha(
-                    captcha_container=captcha_container,
-                    captcha_type=challenge_type,
-                    expected_content_selector=expected_selector,
-                )
+            for attempt in range(3):
+                self.log_message(f"Manual attempt {attempt + 1}...")
+                try:
+                    # Find the iframe
+                    iframe = None
+                    for frame in page.frames:
+                        try:
+                            if "cloudflare" in (await frame.title()).lower():
+                                iframe = frame
+                                break
+                        except Exception:
+                            continue
+                    
+                    if not iframe:
+                         # Fallback for finding iframe by name
+                         for frame in page.frames:
+                            try:
+                                if frame.name and re.match(r"c-[a-z0-9]+", frame.name):
+                                    iframe = frame
+                                    break
+                            except Exception:
+                                continue
 
-            # If solve_captcha completes without exception, we assume it's solved.
-            # Double-check just in case.
-            if not await self.is_bypassed(page):
-                 self.log_message("❌ Failed to solve Cloudflare challenge, still on challenge page.")
-                 return False
+                    if iframe:
+                        self.log_message("Found Cloudflare iframe.")
+                        
+                        checkbox = iframe.locator("input[type=checkbox]")
+                        if await checkbox.is_visible(timeout=5000):
+                            self.log_message("Found checkbox. Performing human-like click.")
+                            
+                            box = await checkbox.bounding_box()
+                            if box:
+                                await page.mouse.move(
+                                    box['x'] + box['width'] / 2 + random.uniform(-5, 5),
+                                    box['y'] + box['height'] / 2 + random.uniform(-5, 5),
+                                    steps=10
+                                )
+                                await page.mouse.down()
+                                await asyncio.sleep(random.uniform(0.1, 0.3))
+                                await page.mouse.up()
 
-            self.log_message("✅ Cloudflare challenge solved successfully!")
-            # Wait a bit more to ensure cookies are set and page is stable
-            await asyncio.sleep(5)
-            return True
+                                # Wait for the page to reload or change
+                                await asyncio.sleep(10)
+                                
+                                if await self.is_bypassed(page):
+                                    self.log_message("✅ Cloudflare challenge solved successfully!")
+                                    await asyncio.sleep(5)
+                                    return True
+                                else:
+                                    self.log_message("Challenge not solved after click.")
+                        else:
+                            self.log_message("Checkbox not visible in iframe.")
+                    else:
+                        self.log_message("Could not find Cloudflare iframe.")
+                except Exception as e:
+                    self.log_message(f"Error in manual attempt: {e}")
+                
+                await asyncio.sleep(3) # Wait before next attempt
+
+            self.log_message("❌ Failed to solve Cloudflare challenge manually after all attempts.")
+            return False
 
         except Exception as e:
             self.log_message(f"Error solving Cloudflare challenge: {e}")
-            # Re-raise the captcha error to be handled upstream if needed
-            if "CaptchaSolvingError" in str(e):
-                raise
             return False
 
     async def get_cookies_and_user_agent(self, context, page) -> Dict[str, Any]:
