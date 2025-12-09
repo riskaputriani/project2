@@ -1,68 +1,80 @@
 import streamlit as st
+import requests
 import subprocess
 import os
-import requests
 import time
 import tarfile
+import psutil
 import shutil
 
 # --- Konfigurasi ---
 FLARESOLVERR_URL = "https://github.com/FlareSolverr/FlareSolverr/releases/download/v3.4.6/flaresolverr_linux_x64.tar.gz"
-DOWNLOAD_DIR = "flaresolverr_bin"
-BINARY_PATH = os.path.join(DOWNLOAD_DIR, "flaresolverr", "flaresolverr") # Sesuaikan path hasil ekstrak
-PORT = 8191
-BASE_URL = f"http://localhost:{PORT}"
+EXTRACT_DIR = "flaresolverr_dir"
+BINARY_PATH = os.path.join(EXTRACT_DIR, "flaresolverr", "flaresolverr")
+API_URL = "http://localhost:8191/v1"
 
-st.set_page_config(page_title="FlareSolverr di Streamlit", layout="wide")
+st.set_page_config(page_title="FlareSolverr Streamlit", layout="wide")
+
+# --- Fungsi Utilities ---
+
+def is_process_running(process_name):
+    """Mengecek apakah proses sudah berjalan."""
+    for proc in psutil.process_iter():
+        try:
+            if process_name.lower() in proc.name().lower():
+                return True
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    return False
+
+def setup_flaresolverr():
+    """Download dan Extract FlareSolverr jika belum ada."""
+    if not os.path.exists(BINARY_PATH):
+        with st.spinner('Mendownload FlareSolverr Binary (Linux x64)...'):
+            # Hapus folder lama jika ada sisa corrupt
+            if os.path.exists(EXTRACT_DIR):
+                shutil.rmtree(EXTRACT_DIR)
+            os.makedirs(EXTRACT_DIR)
+            
+            # Download
+            response = requests.get(FLARESOLVERR_URL, stream=True)
+            tar_path = "flaresolverr.tar.gz"
+            with open(tar_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=1024):
+                    if chunk:
+                        f.write(chunk)
+            
+            # Extract
+            st.info("Mengekstrak files...")
+            with tarfile.open(tar_path, "r:gz") as tar:
+                tar.extractall(path=EXTRACT_DIR)
+            
+            # Cleanup
+            os.remove(tar_path)
+            
+            # Berikan permission execute
+            st.info("Mengatur permissions...")
+            os.chmod(BINARY_PATH, 0o755)
+            st.success("Setup selesai!")
 
 @st.cache_resource
-def setup_and_run_flaresolverr():
+def start_flaresolverr_server():
     """
-    Fungsi ini berjalan sekali saja (cached) untuk setup dan start server.
+    Menjalankan FlareSolverr di background.
+    Menggunakan cache_resource agar tidak restart setiap kali ada interaksi UI.
     """
-    status_text = st.empty()
+    setup_flaresolverr()
     
-    # 1. Cek dan Download
-    if not os.path.exists(BINARY_PATH):
-        status_text.info("Downloading FlareSolverr binary...")
-        try:
-            if not os.path.exists(DOWNLOAD_DIR):
-                os.makedirs(DOWNLOAD_DIR)
-            
-            # Download file
-            response = requests.get(FLARESOLVERR_URL, stream=True)
-            tar_path = os.path.join(DOWNLOAD_DIR, "flaresolverr.tar.gz")
-            with open(tar_path, "wb") as f:
-                f.write(response.content)
-            
-            status_text.info("Extracting FlareSolverr...")
-            # Extract file
-            with tarfile.open(tar_path, "r:gz") as tar:
-                tar.extractall(path=DOWNLOAD_DIR)
-            
-            # Berikan izin eksekusi (chmod +x)
-            if os.path.exists(BINARY_PATH):
-                os.chmod(BINARY_PATH, 0o755)
-            else:
-                st.error(f"Binary tidak ditemukan di: {BINARY_PATH}. Cek struktur folder hasil ekstrak.")
-                return None
-
-        except Exception as e:
-            st.error(f"Gagal saat setup: {e}")
-            return None
-    
-    # 2. Jalankan FlareSolverr sebagai Subprocess
-    status_text.info("Starting FlareSolverr Service...")
-    
-    # Kita perlu memberi tahu FlareSolverr di mana Chromium berada (di Streamlit Cloud biasanya di /usr/bin/chromium)
-    env = os.environ.copy()
-    env["PUPPETEER_EXECUTABLE_PATH"] = "/usr/bin/chromium"
-    env["LOG_LEVEL"] = "info"
-    env["PORT"] = str(PORT)
-
-    try:
-        # Menjalankan binary di background
-        process = subprocess.Popen(
+    if not is_process_running("flaresolverr"):
+        print("Memulai FlareSolverr Server...")
+        # Menjalankan binary. Kita set env var agar menggunakan port default 8191
+        # LOG_LEVEL info agar tidak terlalu spam di logs
+        env = os.environ.copy()
+        env["LOG_LEVEL"] = "info"
+        env["LOG_HTML"] = "false"
+        
+        # PENTING: Start process
+        proc = subprocess.Popen(
             [BINARY_PATH],
             env=env,
             stdout=subprocess.PIPE,
@@ -70,102 +82,88 @@ def setup_and_run_flaresolverr():
             text=True
         )
         
-        # Tunggu sebentar agar server nyala
-        max_retries = 10
-        server_ready = False
-        for i in range(max_retries):
-            try:
-                # Cek health check (biasanya root endpoint mengembalikan JSON)
-                r = requests.get(f"{BASE_URL}/", timeout=2)
-                if r.status_code == 200:
-                    server_ready = True
-                    break
-            except requests.exceptions.ConnectionError:
-                time.sleep(2)
-        
-        if server_ready:
-            status_text.success("FlareSolverr System Ready! ✅")
-            return process
-        else:
-            status_text.error("FlareSolverr gagal start dalam waktu yang ditentukan.")
-            # Print logs jika gagal
-            stdout, stderr = process.communicate()
-            st.code(stdout)
-            st.code(stderr)
-            return None
-
-    except Exception as e:
-        st.error(f"Error launching subprocess: {e}")
-        return None
+        # Tunggu sebentar agar server siap
+        time.sleep(5)
+        return proc
+    return None
 
 # --- Main App Logic ---
 
-st.title("🛡️ FlareSolverr Cloud Bypass")
-st.markdown("Aplikasi ini menjalankan **FlareSolverr v3.4.6** di background untuk memproses URL yang dilindungi.")
+st.title("🛡️ FlareSolverr di Streamlit Cloud")
+st.markdown("""
+Aplikasi ini menjalankan **FlareSolverr** di background (Localhost:8191) untuk mem-bypass Cloudflare challenge.
+""")
 
-# Jalankan Background Process
-proc = setup_and_run_flaresolverr()
+# 1. Start Server
+proc = start_flaresolverr_server()
+
+# Cek status server
+try:
+    health_check = requests.get("http://localhost:8191/")
+    status_msg = f"✅ Server Online: {health_check.json()['msg']}"
+    st.sidebar.success(status_msg)
+except Exception as e:
+    st.sidebar.error("❌ Server Offline atau sedang loading...")
+    st.sidebar.warning(f"Error: {e}")
 
 st.divider()
 
-# Input UI
+# 2. UI Input
 col1, col2 = st.columns([3, 1])
 with col1:
-    target_url = st.text_input("Masukkan URL Target", "https://www.google.com")
+    target_url = st.text_input("Target URL", "https://www.google.com")
 with col2:
-    st.write("") # Spacer
-    st.write("")
-    btn_scan = st.button("🚀 Bypass / Request", type="primary")
+    req_method = st.selectbox("Method", ["GET", "POST"])
 
-# Logic Tombol
-if btn_scan:
-    if not proc:
-        st.error("Service FlareSolverr tidak berjalan. Coba restart app.")
+solve_btn = st.button("🚀 Bypass / Solve", type="primary")
+
+# 3. Action
+if solve_btn:
+    if not target_url:
+        st.warning("Mohon masukkan URL.")
     else:
-        with st.spinner(f"Memproses {target_url} via FlareSolverr..."):
-            try:
-                # Payload sesuai dokumentasi FlareSolverr
-                payload = {
-                    "cmd": "request.get",
-                    "url": target_url,
-                    "maxTimeout": 60000
-                }
+        payload = {
+            "cmd": "request.get" if req_method == "GET" else "request.post",
+            "url": target_url,
+            "maxTimeout": 60000
+        }
+        
+        st.write(f"Mengirim request ke FlareSolverr...")
+        
+        try:
+            start_time = time.time()
+            # Hit API FlareSolverr Lokal
+            res = requests.post(API_URL, json=payload, headers={"Content-Type": "application/json"})
+            end_time = time.time()
+            
+            if res.status_code == 200:
+                data = res.json()
+                st.success(f"Sukses! (Waktu: {round(end_time - start_time, 2)}s)")
                 
-                headers = {"Content-Type": "application/json"}
+                # Menampilkan Hasil
+                tab1, tab2, tab3 = st.tabs(["Response HTML", "Solution JSON", "Screenshot (Jika ada)"])
                 
-                # Hit API Localhost
-                response = requests.post(f"{BASE_URL}/v1", json=payload, headers=headers)
+                with tab1:
+                    # Menampilkan HTML dari solution
+                    if "solution" in data and "response" in data["solution"]:
+                        st.code(data["solution"]["response"][:5000] + "...", language="html")
+                    else:
+                        st.warning("Tidak ada respon HTML.")
+
+                with tab2:
+                    st.json(data)
+                    
+                with tab3:
+                    st.info("Screenshot tidak tersedia dalam mode default request ini.")
+                    
+            else:
+                st.error(f"Gagal. Status Code: {res.status_code}")
+                st.text(res.text)
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    # Tampilkan Status
-                    st.success(f"Status: {data.get('status')}")
-                    
-                    # Tampilkan Solusi (Solution)
-                    solution = data.get('solution', {})
-                    
-                    tab1, tab2, tab3 = st.tabs(["Response JSON", "Rendered HTML", "Cookies"])
-                    
-                    with tab1:
-                        st.json(data)
-                        
-                    with tab2:
-                        # Menampilkan HTML source yang sudah dibypass
-                        html_content = solution.get('response', 'No content')
-                        st.code(html_content, language='html')
-                        # Opsional: Render sebagian (hati-hati dengan scripts)
-                        st.components.v1.html(html_content, height=400, scrolling=True)
-                        
-                    with tab3:
-                        st.json(solution.get('cookies', []))
-                        
-                else:
-                    st.error(f"Error dari FlareSolverr: {response.status_code}")
-                    st.write(response.text)
-                    
-            except Exception as e:
-                st.error(f"Terjadi kesalahan koneksi: {e}")
+        except Exception as e:
+            st.error(f"Terjadi kesalahan saat menghubungi FlareSolverr: {e}")
 
 st.divider()
-st.caption("Running on Streamlit Cloud | FlareSolverr v3.4.6 Linux x64")
+st.markdown("**Catatan:**")
+st.caption("* Aplikasi ini akan mendownload binary sekitar 150MB saat pertama kali dijalankan (cold start).")
+st.caption("* Pastikan URL target valid.")

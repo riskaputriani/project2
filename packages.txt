@@ -1,8 +1,8 @@
 chromium
 chromium-driver
 libnss3
-libglib2.0-0
-libgconf-2-4
-libfontconfig1
-wget
-tar
+libxss1
+libasound2
+libatk-bridge2.0-0
+libgtk-3-0
+libgbm1
